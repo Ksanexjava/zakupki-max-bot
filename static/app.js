@@ -8,7 +8,7 @@ const state = {
   requests: [],
   counts: {},
   total: 0,
-  selectedId: null,
+  openId: null,        // какая заявка открыта в модальном окне
   knownIds: new Set(),
   firstLoad: true,
 };
@@ -17,7 +17,8 @@ const el = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
 ));
-const statusMeta = (key) => state.statuses.find((s) => s.key === key) || { label: key, emoji: '•' };
+const statusMeta = (key) => state.statuses.find((s) => s.key === key) || { label: key };
+const dot = (status) => `<span class="dot" style="--st: var(--st-${esc(status)})"></span>`;
 
 let toastTimer = null;
 function toast(message) {
@@ -29,10 +30,11 @@ function toast(message) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  });
+  const init = { ...options };
+  if (init.body && !(init.body instanceof FormData)) {
+    init.headers = { 'Content-Type': 'application/json', ...(init.headers || {}) };
+  }
+  const response = await fetch(path, init);
   if (response.status === 401) {
     showLogin();
     throw new Error('unauthorized');
@@ -46,6 +48,7 @@ async function api(path, options = {}) {
 
 function showLogin(message) {
   el('app').hidden = true;
+  el('overlay').hidden = true;
   el('login-screen').hidden = false;
   const error = el('login-error');
   error.hidden = !message;
@@ -56,18 +59,16 @@ function showLogin(message) {
 function showApp() {
   el('login-screen').hidden = true;
   el('app').hidden = false;
-  el('user-chip').textContent = state.user ? `👤 ${state.user}` : '';
+  el('user-chip').textContent = state.user || '';
 }
 
 el('login-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  const login = el('login').value.trim();
-  const password = el('password').value;
   try {
     const response = await fetch('/api/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ login, password }),
+      body: JSON.stringify({ login: el('login').value.trim(), password: el('password').value }),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -94,16 +95,14 @@ el('logout-btn').addEventListener('click', async () => {
 /* ------------------------------------------------------------------ табы */
 
 function renderTabs() {
-  const tabs = el('tabs');
-  const buttons = [{ key: '', label: 'Все', emoji: '📋', count: state.total }].concat(
+  const tabs = [{ key: '', label: 'Все', count: state.total }].concat(
     state.statuses.map((s) => ({ ...s, count: state.counts[s.key] || 0 }))
   );
-  tabs.innerHTML = buttons.map((tab) => `
+  el('tabs').innerHTML = tabs.map((tab) => `
     <button class="tab ${state.filter === tab.key ? 'active' : ''}" data-filter="${esc(tab.key)}">
-      <span>${esc(tab.emoji)} ${esc(tab.label)}</span>
-      <span class="count">${tab.count}</span>
+      ${esc(tab.label)}<span class="count">${tab.count}</span>
     </button>`).join('');
-  tabs.querySelectorAll('.tab').forEach((button) => {
+  el('tabs').querySelectorAll('.tab').forEach((button) => {
     button.addEventListener('click', () => {
       state.filter = button.dataset.filter;
       loadList();
@@ -111,38 +110,35 @@ function renderTabs() {
   });
 }
 
-/* --------------------------------------------------------------- список */
+/* --------------------------------------------------------------- таблица */
 
-function cardHtml(row) {
-  const badges = [];
-  if (row.example_url) badges.push('🔗');
-  if (row.photo_href) badges.push('🖼');
+function rowHtml(row) {
+  const marks = [];
+  if (row.example_url) marks.push('ссылка');
+  if (row.photo_href) marks.push('фото');
+  if (row.attachments_count) marks.push(`скрин. ${row.attachments_count}`);
   return `
-    <article class="card ${row.id === state.selectedId ? 'selected' : ''} ${row.status === 'new' ? 'is-new' : ''}"
-             style="--st: var(--st-${esc(row.status)}); --st-bg: var(--st-${esc(row.status)}-bg)"
-             data-id="${row.id}">
-      <div class="card-top">
-        <span class="card-id">№${row.id} · ${esc(row.created_at_human)}</span>
-        <span class="chip">${esc(row.status_emoji)} ${esc(row.status_label)}</span>
-      </div>
-      <div class="card-title">${esc(row.item)} ${badges.join(' ')}</div>
-      <div class="card-meta">
-        <span>👤 ${esc(row.requester)}</span>
-        <span>🔢 ${esc(row.quantity || '—')}</span>
-        <span>📅 ${esc(row.deadline || '—')}</span>
-      </div>
-      <div class="card-purpose">🎯 ${esc(row.purpose)}</div>
-    </article>`;
+    <tr data-id="${row.id}">
+      <td class="cell-num">${row.id}</td>
+      <td>
+        <div class="cell-item">${esc(row.item)}${marks.length ? `<span class="cell-mark">${esc(marks.join(' · '))}</span>` : ''}</div>
+        <div class="cell-purpose">${esc(row.purpose)}</div>
+      </td>
+      <td>${esc(row.requester)}</td>
+      <td class="cell-qty">${esc(row.quantity || '—')}</td>
+      <td class="cell-due">${esc(row.deadline || '—')}</td>
+      <td><span class="status">${dot(row.status)}${esc(row.status_label)}</span></td>
+      <td class="cell-date">${esc(row.created_at_human)}</td>
+    </tr>`;
 }
 
 function renderList() {
-  const list = el('list');
-  list.innerHTML = state.requests.map(cardHtml).join('');
+  el('rows').innerHTML = state.requests.map(rowHtml).join('');
   el('empty').hidden = state.requests.length > 0;
-  list.querySelectorAll('.card').forEach((card) => {
-    card.addEventListener('click', () => openDetail(Number(card.dataset.id)));
+  document.querySelector('.requests').hidden = state.requests.length === 0;
+  el('rows').querySelectorAll('tr').forEach((tr) => {
+    tr.addEventListener('click', () => openRequest(Number(tr.dataset.id)));
   });
-  el('total-badge').textContent = state.total;
 }
 
 async function loadList(silent = false) {
@@ -152,9 +148,9 @@ async function loadList(silent = false) {
   const data = await api(`/api/requests?${params.toString()}`);
 
   const incoming = data.requests.map((row) => row.id);
-  if (!state.firstLoad) {
+  if (!state.firstLoad && silent) {
     const fresh = incoming.filter((id) => !state.knownIds.has(id));
-    if (fresh.length && silent) {
+    if (fresh.length) {
       toast(fresh.length === 1 ? `Новая заявка №${fresh[0]}` : `Новых заявок: ${fresh.length}`);
     }
   }
@@ -166,97 +162,111 @@ async function loadList(silent = false) {
   state.total = data.total;
   renderTabs();
   renderList();
-  updateTitle();
-}
-
-function updateTitle() {
   const unseen = state.counts.new || 0;
   document.title = unseen ? `(${unseen}) Заявки на закупку` : 'Заявки на закупку';
 }
 
-/* ---------------------------------------------------------------- деталь */
+/* ------------------------------------------------------- карточка заявки */
 
-function detailHtml(row, history) {
+function shotHtml(item) {
+  return `
+    <div class="shot" data-attachment="${item.id}">
+      <a href="${esc(item.url)}" target="_blank" rel="noopener">
+        <img src="${esc(item.url)}" alt="${esc(item.original_name || 'Скриншот')}" loading="lazy">
+      </a>
+      <button class="shot-remove" data-remove="${item.id}" title="Удалить скриншот">&times;</button>
+      <div class="shot-caption">${esc(item.uploaded_at)}</div>
+    </div>`;
+}
+
+function modalHtml(row, history, attachments) {
   const example = row.example_url
     ? (row.example_is_link
       ? `<a href="${esc(row.example_url)}" target="_blank" rel="noopener">${esc(row.example_url)}</a>`
       : esc(row.example_url))
     : '<span class="muted">не приложен</span>';
 
-  const photo = row.photo_href
-    ? `<a href="${esc(row.photo_href)}" target="_blank" rel="noopener">
-         <img class="photo" src="${esc(row.photo_href)}" alt="Пример товара"></a>`
-    : '';
-
   const author = `${esc(row.author_name || '—')}${row.author_username ? ` (@${esc(row.author_username)})` : ''}`;
+
+  const fromBot = row.photo_href
+    ? `<div class="shot">
+         <a href="${esc(row.photo_href)}" target="_blank" rel="noopener">
+           <img src="${esc(row.photo_href)}" alt="Фото от заказчика" loading="lazy"></a>
+         <div class="shot-caption">от заказчика</div>
+       </div>`
+    : '';
 
   const statusButtons = state.statuses.map((s) => `
     <button class="status-btn ${s.key === row.status ? 'current' : ''}"
-            style="--st: var(--st-${esc(s.key)}); --st-bg: var(--st-${esc(s.key)}-bg)"
-            data-status="${esc(s.key)}" ${s.key === row.status ? 'disabled' : ''}>
-      ${esc(s.emoji)} ${esc(s.label)}
+            style="--st: var(--st-${esc(s.key)})" data-status="${esc(s.key)}"
+            ${s.key === row.status ? 'disabled' : ''}>
+      ${dot(s.key)}${esc(s.label)}
     </button>`).join('');
 
-  const historyHtml = history.map((item) => {
-    const transition = item.to_label
+  const historyHtml = history.slice().reverse().map((item) => {
+    const line = item.to_label
       ? `${item.from_label ? `${esc(item.from_label)} → ` : ''}<b>${esc(item.to_label)}</b>`
       : 'комментарий';
     return `
       <div class="history-item">
-        <div>${transition} · ${esc(item.actor)}</div>
+        <div>${line} · ${esc(item.actor)}</div>
         <div class="history-when">${esc(item.at_human)}</div>
         ${item.comment ? `<div class="history-comment">${esc(item.comment)}</div>` : ''}
       </div>`;
-  }).reverse().join('');
+  }).join('');
 
   return `
-    <div class="detail-head" style="--st: var(--st-${esc(row.status)}); --st-bg: var(--st-${esc(row.status)}-bg)">
-      <div class="row">
-        <span class="card-id">Заявка №${row.id}</span>
-        <span class="chip">${esc(row.status_emoji)} ${esc(row.status_label)}</span>
-      </div>
-      <h2>${esc(row.item)}</h2>
-    </div>
+    <div class="modal-title-item">${esc(row.item)}</div>
 
     <dl class="fields">
       <div class="field"><dt>Кто заказывает</dt><dd>${esc(row.requester)}</dd></div>
       <div class="field"><dt>Количество</dt><dd>${esc(row.quantity || '—')}</dd></div>
       <div class="field"><dt>Нужно к сроку</dt><dd>${esc(row.deadline || '—')}</dd></div>
       <div class="field"><dt>Цель</dt><dd>${esc(row.purpose)}</dd></div>
-      <div class="field"><dt>Пример</dt><dd>${example}</dd></div>
-      <div class="field"><dt>Автор в MAX</dt><dd>${author}</dd></div>
+      <div class="field"><dt>Пример от заказчика</dt><dd>${example}</dd></div>
+      <div class="field"><dt>Оформил в MAX</dt><dd>${author}</dd></div>
       <div class="field"><dt>Создана</dt><dd>${esc(row.created_at_human)}</dd></div>
       <div class="field"><dt>Изменена</dt><dd>${esc(row.updated_at_human)}</dd></div>
       ${row.admin_comment ? `<div class="field"><dt>Комментарий</dt><dd>${esc(row.admin_comment)}</dd></div>` : ''}
     </dl>
 
-    ${photo}
+    <div class="section">
+      <div class="section-title">Скриншоты заказа</div>
+      <div class="shots" id="shots">${fromBot}${attachments.map(shotHtml).join('')}</div>
+      <div class="dropzone" id="dropzone">
+        Перетащите сюда файл, вставьте из буфера (Cmd+V) или нажмите, чтобы выбрать.
+        PNG, JPEG, WebP, GIF до 10 МБ.
+      </div>
+      <input type="file" id="file-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+    </div>
 
-    <div>
+    <div class="section">
       <div class="section-title">Комментарий для автора</div>
-      <div class="comment-box">
-        <textarea id="comment" placeholder="Например: уточните, нужен ли чайник с терморегулятором"></textarea>
-        <p class="comment-hint">Уйдёт автору в MAX — вместе со сменой статуса или отдельной кнопкой ниже.</p>
-        <button class="btn" id="comment-only-btn">💬 Отправить комментарий без смены статуса</button>
+      <textarea id="comment" placeholder="Например: уточните, нужен ли чайник с терморегулятором"></textarea>
+      <p class="hint">Уйдёт автору в MAX — вместе со сменой статуса или отдельной кнопкой.</p>
+      <div class="row-actions">
+        <button class="btn" id="comment-only-btn">Отправить комментарий</button>
       </div>
     </div>
 
-    <div>
-      <div class="section-title">Поставить статус</div>
+    <div class="section">
+      <div class="section-title">Статус</div>
       <div class="status-grid">${statusButtons}</div>
     </div>
 
-    <div>
+    <div class="section">
       <div class="section-title">История</div>
       <div class="history">${historyHtml}</div>
     </div>
 
-    <div class="detail-footer">
-      <button class="btn btn-danger" id="delete-btn">🗑 Удалить заявку</button>
-      <div class="delete-confirm" id="delete-confirm" hidden>
-        <p>Удалить заявку №${row.id} вместе с историей и фотографией? Вернуть будет нельзя,
-           автору уйдёт сообщение об удалении.</p>
-        <div class="delete-actions">
+    <div class="modal-footer">
+      <div class="row-actions">
+        <button class="btn btn-danger" id="delete-btn">Удалить заявку</button>
+      </div>
+      <div id="delete-confirm" hidden>
+        <p class="hint">Заявка исчезнет вместе с историей и скриншотами, вернуть будет нельзя.
+           Автору уйдёт сообщение об удалении.</p>
+        <div class="row-actions">
           <button class="btn btn-danger" id="delete-yes">Да, удалить</button>
           <button class="btn" id="delete-no">Отмена</button>
         </div>
@@ -264,33 +274,128 @@ function detailHtml(row, history) {
     </div>`;
 }
 
-async function openDetail(id) {
-  state.selectedId = id;
-  history.replaceState(null, '', `#${id}`);
-  renderList();
+async function openRequest(id) {
   const data = await api(`/api/requests/${id}`);
-  el('detail-placeholder').hidden = true;
-  const detail = el('detail');
-  detail.hidden = false;
-  detail.innerHTML = detailHtml(data.request, data.history);
+  const row = data.request;
+  state.openId = id;
+  history.replaceState(null, '', `#${id}`);
 
-  detail.querySelectorAll('.status-btn').forEach((button) => {
+  el('modal-title').innerHTML = `${dot(row.status)}Заявка №${row.id} · ${esc(row.status_label)}`;
+  el('modal-body').innerHTML = modalHtml(row, data.history, data.attachments || []);
+  el('overlay').hidden = false;
+  document.body.style.overflow = 'hidden';
+
+  el('modal-body').querySelectorAll('.status-btn').forEach((button) => {
     button.addEventListener('click', () => setStatus(id, button.dataset.status));
   });
   el('comment-only-btn').addEventListener('click', () => saveComment(id));
 
   const askDelete = el('delete-btn');
   const confirmBox = el('delete-confirm');
-  askDelete.addEventListener('click', () => {
-    askDelete.hidden = true;
-    confirmBox.hidden = false;
-  });
-  el('delete-no').addEventListener('click', () => {
-    confirmBox.hidden = true;
-    askDelete.hidden = false;
-  });
+  askDelete.addEventListener('click', () => { askDelete.hidden = true; confirmBox.hidden = false; });
+  el('delete-no').addEventListener('click', () => { confirmBox.hidden = true; askDelete.hidden = false; });
   el('delete-yes').addEventListener('click', () => deleteRequest(id));
+
+  bindUpload(id);
 }
+
+function closeModal() {
+  el('overlay').hidden = true;
+  el('modal-body').innerHTML = '';
+  state.openId = null;
+  document.body.style.overflow = '';
+  history.replaceState(null, '', location.pathname);
+}
+
+el('modal-close').addEventListener('click', closeModal);
+el('overlay').addEventListener('click', (event) => {
+  if (event.target === el('overlay')) closeModal();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !el('overlay').hidden) closeModal();
+});
+
+// Ссылка «Открыть панель» из MAX ведёт на /#<номер>. Если вкладка уже открыта,
+// страница не перезагружается — ловим смену адреса вручную.
+window.addEventListener('hashchange', () => {
+  const id = Number(location.hash.replace('#', ''));
+  if (id && id !== state.openId) {
+    openRequest(id).catch(() => toast(`Заявки №${id} нет`));
+  } else if (!id && !el('overlay').hidden) {
+    closeModal();
+  }
+});
+
+/* ------------------------------------------------------------- скриншоты */
+
+function bindUpload(id) {
+  const zone = el('dropzone');
+  const input = el('file-input');
+
+  zone.addEventListener('click', () => input.click());
+  input.addEventListener('change', () => uploadFiles(id, input.files));
+
+  zone.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    zone.classList.add('over');
+  });
+  zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+  zone.addEventListener('drop', (event) => {
+    event.preventDefault();
+    zone.classList.remove('over');
+    uploadFiles(id, event.dataTransfer.files);
+  });
+
+  el('shots').querySelectorAll('[data-remove]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      removeAttachment(id, Number(button.dataset.remove));
+    });
+  });
+}
+
+document.addEventListener('paste', (event) => {
+  if (el('overlay').hidden || !state.openId) return;
+  const files = [...(event.clipboardData?.files || [])];
+  if (files.length) {
+    event.preventDefault();
+    uploadFiles(state.openId, files);
+  }
+});
+
+async function uploadFiles(id, files) {
+  const list = [...(files || [])].filter((file) => file.type.startsWith('image/'));
+  if (!list.length) { toast('Нужен файл-картинка'); return; }
+
+  let saved = 0;
+  for (const file of list) {
+    const form = new FormData();
+    form.append('file', file, file.name || 'screenshot.png');
+    try {
+      await api(`/api/requests/${id}/attachments`, { method: 'POST', body: form });
+      saved += 1;
+    } catch (error) {
+      const code = error.data?.error;
+      toast(code === 'too_large' ? 'Файл больше 10 МБ'
+        : code === 'unsupported_type' ? `Такой формат не принимаем: ${error.data.detail || ''}`
+        : 'Не удалось загрузить файл');
+    }
+  }
+  if (saved) {
+    toast(saved === 1 ? 'Скриншот приложен' : `Приложено скриншотов: ${saved}`);
+    await openRequest(id);
+    await loadList();
+  }
+}
+
+async function removeAttachment(id, attachmentId) {
+  await api(`/api/attachments/${attachmentId}`, { method: 'DELETE' });
+  toast('Скриншот удалён');
+  await openRequest(id);
+  await loadList();
+}
+
+/* ------------------------------------------------------- статус и удаление */
 
 async function setStatus(id, status) {
   const comment = (el('comment')?.value || '').trim();
@@ -302,7 +407,7 @@ async function setStatus(id, status) {
     ? `Статус: ${statusMeta(status).label}. Автору отправлено уведомление.`
     : `Статус: ${statusMeta(status).label}. Автору НЕ отправлено${result.notify_error ? `: ${result.notify_error}` : ''}`);
   await loadList();
-  await openDetail(id);
+  await openRequest(id);
 }
 
 async function saveComment(id) {
@@ -315,7 +420,7 @@ async function saveComment(id) {
   toast(result.author_notified
     ? 'Комментарий отправлен автору'
     : `Комментарий сохранён, но автору НЕ отправлен${result.notify_error ? `: ${result.notify_error}` : ''}`);
-  await openDetail(id);
+  await openRequest(id);
 }
 
 async function deleteRequest(id) {
@@ -323,15 +428,12 @@ async function deleteRequest(id) {
   toast(result.author_notified
     ? `Заявка №${id} удалена, автору отправлено сообщение`
     : `Заявка №${id} удалена. Автору НЕ отправлено${result.notify_error ? `: ${result.notify_error}` : ''}`);
-  state.selectedId = null;
   state.knownIds.delete(id);
-  history.replaceState(null, '', location.pathname);
-  el('detail').hidden = true;
-  el('detail-placeholder').hidden = false;
+  closeModal();
   await loadList();
 }
 
-/* ------------------------------------------------------- поиск и старт */
+/* --------------------------------------------------------- поиск и старт */
 
 let searchTimer = null;
 el('search').addEventListener('input', (event) => {
@@ -349,7 +451,7 @@ async function boot() {
   state.statuses = meta.statuses;
   await loadList();
   const hashId = Number(location.hash.replace('#', ''));
-  if (hashId) openDetail(hashId).catch(() => {});
+  if (hashId) openRequest(hashId).catch(() => history.replaceState(null, '', location.pathname));
 }
 
 async function init() {
@@ -363,7 +465,7 @@ async function init() {
 }
 
 setInterval(() => {
-  if (!el('app').hidden) loadList(true).catch(() => {});
+  if (!el('app').hidden && el('overlay').hidden) loadList(true).catch(() => {});
 }, 20000);
 
 init();

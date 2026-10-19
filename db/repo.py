@@ -2,11 +2,11 @@
 
 from typing import Any, Sequence
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, inspect as sa_inspect, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.statuses import DEFAULT_STATUS
-from db.models import Admin, Request, StatusHistory, utcnow
+from db.models import Admin, Attachment, Request, StatusHistory, utcnow
 from db.session import Session
 
 # ------------------------------------------------------------------ заявки
@@ -114,12 +114,18 @@ async def add_comment(request_id: int, actor: str, comment: str) -> Request | No
 
 
 async def delete_request(request_id: int) -> dict[str, Any] | None:
-    """Удаляет заявку вместе с историей. Возвращает её данные (для уведомления)."""
+    """Удаляет заявку с историей и вложениями.
+
+    Возвращает её данные плюс `files` — имена файлов, которые надо стереть с диска.
+    """
     async with Session() as session:
         request = await session.get(Request, request_id)
         if request is None:
             return None
         data = to_dict(request)
+        data["files"] = [item.filename for item in request.attachments]
+        if request.photo_file:
+            data["files"].append(request.photo_file)
         await session.delete(request)
         await session.commit()
         return data
@@ -177,7 +183,11 @@ async def is_admin(user_id: int, extra: Sequence[int] = ()) -> bool:
 
 def to_dict(request: Request) -> dict[str, Any]:
     """Заявка в виде обычного словаря — для JSON панели и текстов бота."""
+    # связь может быть ещё не подгружена (например, сразу после создания)
+    unloaded = sa_inspect(request).unloaded
+    attachments_count = 0 if "attachments" in unloaded else len(request.attachments)
     return {
+        "attachments_count": attachments_count,
         "id": request.id,
         "created_at": request.created_at,
         "updated_at": request.updated_at,
@@ -206,4 +216,57 @@ def history_to_dict(item: StatusHistory) -> dict[str, Any]:
         "from_status": item.from_status,
         "to_status": item.to_status,
         "comment": item.comment,
+    }
+
+
+# ------------------------------------------------------------- вложения
+
+async def add_attachment(
+    request_id: int,
+    filename: str,
+    original_name: str | None,
+    uploaded_by: str,
+) -> dict[str, Any] | None:
+    async with Session() as session:
+        if await session.get(Request, request_id) is None:
+            return None
+        item = Attachment(
+            request_id=request_id,
+            filename=filename,
+            original_name=original_name,
+            uploaded_by=uploaded_by,
+        )
+        session.add(item)
+        await session.commit()
+        await session.refresh(item)
+        return attachment_to_dict(item)
+
+
+async def list_attachments(request_id: int) -> list[dict[str, Any]]:
+    stmt = select(Attachment).where(Attachment.request_id == request_id).order_by(Attachment.id)
+    async with Session() as session:
+        rows = (await session.execute(stmt)).scalars().all()
+        return [attachment_to_dict(item) for item in rows]
+
+
+async def delete_attachment(attachment_id: int) -> dict[str, Any] | None:
+    async with Session() as session:
+        item = await session.get(Attachment, attachment_id)
+        if item is None:
+            return None
+        data = attachment_to_dict(item)
+        await session.delete(item)
+        await session.commit()
+        return data
+
+
+def attachment_to_dict(item: Attachment) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "request_id": item.request_id,
+        "filename": item.filename,
+        "original_name": item.original_name,
+        "uploaded_by": item.uploaded_by,
+        "uploaded_at": item.uploaded_at,
+        "url": f"/media/{item.filename}",
     }

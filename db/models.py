@@ -47,6 +47,13 @@ class Request(Base):
     # что добавили закупки
     admin_comment: Mapped[str | None] = mapped_column(Text, default=None)
 
+    attachments: Mapped[list["Attachment"]] = relationship(
+        back_populates="request",
+        cascade="all, delete-orphan",
+        order_by="Attachment.id",
+        lazy="selectin",
+    )
+
     history: Mapped[list["StatusHistory"]] = relationship(
         back_populates="request",
         cascade="all, delete-orphan",
@@ -73,6 +80,23 @@ class StatusHistory(Base):
     comment: Mapped[str | None] = mapped_column(Text, default=None)
 
     request: Mapped[Request] = relationship(back_populates="history")
+
+
+class Attachment(Base):
+    """Скриншот, приложенный к заявке в панели (чек, корзина, карточка товара)."""
+
+    __tablename__ = "attachments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_id: Mapped[int] = mapped_column(
+        ForeignKey("requests.id", ondelete="CASCADE"), index=True
+    )
+    filename: Mapped[str] = mapped_column(String(200))
+    original_name: Mapped[str | None] = mapped_column(String(300), default=None)
+    uploaded_by: Mapped[str] = mapped_column(String(200), default="panel")
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    request: Mapped[Request] = relationship(back_populates="attachments")
 
 
 class Admin(Base):

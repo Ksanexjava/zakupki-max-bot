@@ -190,3 +190,99 @@ def test_done_status_available():
             await client.close()
 
     run(scenario())
+
+
+PNG_1PX = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+    "1f15c4890000000a49444154789c6360000002000100ffff030000060005"
+    "57bfabd40000000049454e44ae426082"
+)
+
+
+def _png_form(name: str = "shot.png", content_type: str = "image/png", data: bytes = PNG_1PX):
+    from aiohttp import FormData
+
+    form = FormData()
+    form.add_field("file", data, filename=name, content_type=content_type)
+    return form
+
+
+def test_attachment_upload_detail_and_delete():
+    async def scenario():
+        client = await _client()
+        try:
+            created = await _make_request(item="Заявка со скриншотом")
+            await _login(client)
+
+            response = await client.post(
+                f"/api/requests/{created.id}/attachments", data=_png_form()
+            )
+            body = await response.json()
+            assert response.status == 200 and body["ok"]
+            attachment = body["attachment"]
+            assert attachment["original_name"] == "shot.png"
+            assert attachment["uploaded_by"] == LOGIN
+
+            saved = settings.media_dir / attachment["filename"]
+            assert saved.is_file(), "файл должен лежать в media_dir"
+
+            # появился в карточке и в счётчике списка
+            detail = await (await client.get(f"/api/requests/{created.id}")).json()
+            assert len(detail["attachments"]) == 1
+            listing = await (await client.get("/api/requests")).json()
+            row = next(r for r in listing["requests"] if r["id"] == created.id)
+            assert row["attachments_count"] == 1
+
+            # картинку отдаёт только авторизованный
+            assert (await client.get(attachment["url"])).status == 200
+
+            assert (await client.delete(f"/api/attachments/{attachment['id']}")).status == 200
+            assert not saved.exists(), "файл должен удаляться вместе с записью"
+            assert (await client.delete(f"/api/attachments/{attachment['id']}")).status == 404
+        finally:
+            await client.close()
+
+    run(scenario())
+
+
+def test_attachment_rejects_non_image():
+    async def scenario():
+        client = await _client()
+        try:
+            created = await _make_request(item="Заявка с чужим файлом")
+            await _login(client)
+            response = await client.post(
+                f"/api/requests/{created.id}/attachments",
+                data=_png_form("notes.txt", "text/plain", "просто текст".encode()),
+            )
+            assert response.status == 415
+            assert (await response.json())["error"] == "unsupported_type"
+
+            missing = await client.post("/api/requests/999999/attachments", data=_png_form())
+            assert missing.status == 404
+        finally:
+            await client.close()
+
+    run(scenario())
+
+
+def test_deleting_request_removes_attachment_files():
+    async def scenario():
+        bot = FakeBot()
+        client = await _client(bot)
+        try:
+            created = await _make_request(item="Заявка на удаление со скрином")
+            await _login(client)
+            body = await (
+                await client.post(f"/api/requests/{created.id}/attachments", data=_png_form())
+            ).json()
+            saved = settings.media_dir / body["attachment"]["filename"]
+            assert saved.is_file()
+
+            assert (await client.delete(f"/api/requests/{created.id}")).status == 200
+            assert not saved.exists(), "файлы удалённой заявки не должны оставаться на диске"
+            assert await repo.list_attachments(created.id) == []
+        finally:
+            await client.close()
+
+    run(scenario())

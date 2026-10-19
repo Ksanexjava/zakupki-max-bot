@@ -5,16 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Заявки на закупку</title>
   <link rel="stylesheet" href="/static/styles.css">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📦</text></svg>">
 </head>
 <body>
 
-<!-- ЭКРАН ВХОДА -->
+<!-- ВХОД -->
 <section id="login-screen" class="login-screen" hidden>
   <form class="login-card" id="login-form">
-    <div class="login-emoji">📦</div>
     <h1>Заявки на закупку</h1>
-    <p class="muted">Введите логин и пароль, которые выданы вам администратором.</p>
+    <p class="muted">Введите логин и пароль, выданные администратором.</p>
     <label>Логин
       <input type="text" id="login" name="login" autocomplete="username" required>
     </label>
@@ -22,41 +20,52 @@
       <input type="password" id="password" name="password" autocomplete="current-password" required>
     </label>
     <button type="submit" class="btn btn-primary btn-block">Войти</button>
-    <p class="login-error" id="login-error" hidden></p>
+    <p class="form-error" id="login-error" hidden></p>
   </form>
 </section>
 
 <!-- ПАНЕЛЬ -->
 <div id="app" class="app" hidden>
   <header class="topbar">
-    <div class="topbar-left">
-      <span class="logo">📦</span>
-      <h1>Заявки на закупку</h1>
-      <span class="total-badge" id="total-badge">0</span>
-    </div>
+    <h1>Заявки на закупку</h1>
     <div class="topbar-right">
-      <input type="search" id="search" class="search" placeholder="Поиск: товар, автор, №" autocomplete="off">
-      <button class="btn btn-ghost" id="refresh-btn" title="Обновить сейчас">⟳</button>
-      <span class="user-chip" id="user-chip"></span>
-      <button class="btn btn-ghost" id="logout-btn">Выйти</button>
+      <input type="search" id="search" class="search" placeholder="Поиск по товару, автору, номеру" autocomplete="off">
+      <button class="btn btn-quiet" id="refresh-btn">Обновить</button>
+      <span class="user" id="user-chip"></span>
+      <button class="btn btn-quiet" id="logout-btn">Выйти</button>
     </div>
   </header>
 
   <nav class="tabs" id="tabs"></nav>
 
-  <main class="layout">
-    <section class="list-pane">
-      <div id="list" class="list"></div>
-      <p class="empty" id="empty" hidden>Заявок пока нет.</p>
-    </section>
-
-    <aside class="detail-pane" id="detail-pane">
-      <div class="detail-placeholder" id="detail-placeholder">
-        <p>Выберите заявку слева, чтобы посмотреть детали и поставить статус.</p>
-      </div>
-      <div class="detail" id="detail" hidden></div>
-    </aside>
+  <main class="content">
+    <table class="requests">
+      <thead>
+        <tr>
+          <th class="col-num">№</th>
+          <th>Товар</th>
+          <th class="col-who">Кто заказывает</th>
+          <th class="col-qty">Количество</th>
+          <th class="col-due">Срок</th>
+          <th class="col-status">Статус</th>
+          <th class="col-date">Создана</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p class="empty" id="empty" hidden>Заявок пока нет.</p>
   </main>
+</div>
+
+<!-- КАРТОЧКА ЗАЯВКИ -->
+<div class="overlay" id="overlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <header class="modal-head">
+      <h2 id="modal-title">Заявка</h2>
+      <button class="icon-btn" id="modal-close" title="Закрыть (Esc)" aria-label="Закрыть">&times;</button>
+    </header>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
 </div>
 
 <div class="toast" id="toast" hidden></div>

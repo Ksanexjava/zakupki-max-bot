@@ -5,6 +5,7 @@ import hmac
 import logging
 import secrets
 import time
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,16 @@ LOGIN_FAILURES_KEY: web.AppKey[dict] = web.AppKey("login_failures")
 STATIC_DIR = BASE_DIR / "static"
 LOGIN_WINDOW = 600  # секунд
 LOGIN_MAX_FAILURES = 10
+
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+#: какие картинки принимаем и с каким расширением сохраняем
+ALLOWED_IMAGE_TYPES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
 
 
 # ------------------------------------------------------------------ сессии
@@ -190,7 +201,16 @@ async def handle_detail(request: web.Request) -> web.StreamResponse:
         entry["from_label"] = STATUSES.get(entry.get("from_status") or "", {}).get("label")
         entry["to_label"] = STATUSES.get(entry.get("to_status") or "", {}).get("label")
         history.append(entry)
-    return web.json_response({"request": _decorate(repo.to_dict(found)), "history": history})
+    return web.json_response(
+        {
+            "request": _decorate(repo.to_dict(found)),
+            "history": history,
+            "attachments": [
+                {**item, "uploaded_at": texts.fmt_dt(item["uploaded_at"])}
+                for item in await repo.list_attachments(request_id)
+            ],
+        }
+    )
 
 
 async def handle_set_status(request: web.Request) -> web.StreamResponse:
@@ -257,11 +277,87 @@ async def handle_delete(request: web.Request) -> web.StreamResponse:
     if data is None:
         return web.json_response({"error": "not_found"}, status=404)
 
-    remove_photo(data.get("photo_file"))
+    for name in data.get("files", []):
+        remove_photo(name)
     log.info("Заявка №%s удалена пользователем %s", request_id, actor)
 
     notified, error = await notify_author_deleted(request.app.get(BOT_KEY), data)
     return web.json_response({"ok": True, "author_notified": notified, "notify_error": error})
+
+
+async def handle_upload(request: web.Request) -> web.StreamResponse:
+    """Приём скриншота к заявке: multipart-поле `file`."""
+    actor = current_user(request) or "panel"
+    request_id = int(request.match_info["request_id"])
+    if await repo.get_request(request_id) is None:
+        return web.json_response({"error": "not_found"}, status=404)
+
+    try:
+        reader = await request.multipart()
+    except Exception:  # noqa: BLE001
+        return web.json_response({"error": "bad_request"}, status=400)
+
+    field = await reader.next()
+    while field is not None and field.name != "file":
+        field = await reader.next()
+    if field is None:
+        return web.json_response({"error": "no_file"}, status=400)
+
+    content_type = (field.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    extension = ALLOWED_IMAGE_TYPES.get(content_type)
+    if extension is None:
+        return web.json_response(
+            {"error": "unsupported_type", "detail": content_type or "неизвестный тип"},
+            status=415,
+        )
+
+    settings.media_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    filename = f"{stamp}-{secrets.token_hex(4)}{extension}"
+    path = settings.media_dir / filename
+
+    size = 0
+    try:
+        with path.open("wb") as fh:
+            while True:
+                chunk = await field.read_chunk()
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise ValueError("too_large")
+                fh.write(chunk)
+    except ValueError:
+        path.unlink(missing_ok=True)
+        return web.json_response(
+            {"error": "too_large", "limit_mb": MAX_UPLOAD_BYTES // (1024 * 1024)}, status=413
+        )
+    except OSError as exc:
+        path.unlink(missing_ok=True)
+        log.warning("Не удалось сохранить вложение: %s", exc)
+        return web.json_response({"error": "write_failed"}, status=500)
+
+    if size == 0:
+        path.unlink(missing_ok=True)
+        return web.json_response({"error": "empty_file"}, status=400)
+
+    saved = await repo.add_attachment(request_id, filename, field.filename, actor)
+    if saved is None:
+        path.unlink(missing_ok=True)
+        return web.json_response({"error": "not_found"}, status=404)
+
+    log.info("К заявке №%s приложен скриншот %s (%s КБ)", request_id, filename, size // 1024)
+    saved["uploaded_at"] = texts.fmt_dt(saved["uploaded_at"])
+    return web.json_response({"ok": True, "attachment": saved})
+
+
+async def handle_delete_attachment(request: web.Request) -> web.StreamResponse:
+    attachment_id = int(request.match_info["attachment_id"])
+    data = await repo.delete_attachment(attachment_id)
+    if data is None:
+        return web.json_response({"error": "not_found"}, status=404)
+    remove_photo(data["filename"])
+    return web.json_response({"ok": True})
 
 
 async def handle_media(request: web.Request) -> web.StreamResponse:
@@ -288,6 +384,8 @@ def create_app(bot: Any = None) -> web.Application:
             web.post(r"/api/requests/{request_id:\d+}/status", handle_set_status),
             web.post(r"/api/requests/{request_id:\d+}/comment", handle_comment),
             web.delete(r"/api/requests/{request_id:\d+}", handle_delete),
+            web.post(r"/api/requests/{request_id:\d+}/attachments", handle_upload),
+            web.delete(r"/api/attachments/{attachment_id:\d+}", handle_delete_attachment),
             web.get("/media/{filename}", handle_media),
             web.static("/static", STATIC_DIR),
         ]
