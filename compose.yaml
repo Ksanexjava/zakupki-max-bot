@@ -1,0 +1,27 @@
+services:
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:////data/purchases.db
+      MEDIA_DIR: /data/media
+      PANEL_HOST: 0.0.0.0
+      PANEL_PORT: 8080
+      # Шаги незаполненных заявок переживают перезапуск:
+      # REDIS_URL: redis://redis:6379/0
+    ports:
+      # Наружу порт не светим: доступ только через nginx на том же сервере.
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+
+  # Нужен, только если включили REDIS_URL выше.
+  # redis:
+  #   image: redis:7-alpine
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 5s
+  #     timeout: 3s
+  #     retries: 10
+  #   restart: unless-stopped

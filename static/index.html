@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Заявки на закупку</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📦</text></svg>">
+</head>
+<body>
+
+<!-- ЭКРАН ВХОДА -->
+<section id="login-screen" class="login-screen" hidden>
+  <form class="login-card" id="login-form">
+    <div class="login-emoji">📦</div>
+    <h1>Заявки на закупку</h1>
+    <p class="muted">Введите логин и пароль, которые выданы вам администратором.</p>
+    <label>Логин
+      <input type="text" id="login" name="login" autocomplete="username" required>
+    </label>
+    <label>Пароль
+      <input type="password" id="password" name="password" autocomplete="current-password" required>
+    </label>
+    <button type="submit" class="btn btn-primary btn-block">Войти</button>
+    <p class="login-error" id="login-error" hidden></p>
+  </form>
+</section>
+
+<!-- ПАНЕЛЬ -->
+<div id="app" class="app" hidden>
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="logo">📦</span>
+      <h1>Заявки на закупку</h1>
+      <span class="total-badge" id="total-badge">0</span>
+    </div>
+    <div class="topbar-right">
+      <input type="search" id="search" class="search" placeholder="Поиск: товар, автор, №" autocomplete="off">
+      <button class="btn btn-ghost" id="refresh-btn" title="Обновить сейчас">⟳</button>
+      <span class="user-chip" id="user-chip"></span>
+      <button class="btn btn-ghost" id="logout-btn">Выйти</button>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs"></nav>
+
+  <main class="layout">
+    <section class="list-pane">
+      <div id="list" class="list"></div>
+      <p class="empty" id="empty" hidden>Заявок пока нет.</p>
+    </section>
+
+    <aside class="detail-pane" id="detail-pane">
+      <div class="detail-placeholder" id="detail-placeholder">
+        <p>Выберите заявку слева, чтобы посмотреть детали и поставить статус.</p>
+      </div>
+      <div class="detail" id="detail" hidden></div>
+    </aside>
+  </main>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

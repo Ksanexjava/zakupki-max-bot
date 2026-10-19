@@ -1,0 +1,23 @@
+# Пример конфига nginx. Положить в /etc/nginx/sites-available/zakupki,
+# затем: ln -s /etc/nginx/sites-available/zakupki /etc/nginx/sites-enabled/
+#
+# HTTPS-сертификат ставится одной командой после того, как заработает HTTP:
+#   sudo certbot --nginx -d zakupki.example.ru
+
+server {
+    listen 80;
+    server_name zakupki.example.ru;
+
+    # Панель целиком проксируется на приложение
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+
+    # Фотографии из заявок могут быть большими
+    client_max_body_size 20m;
+}

@@ -1,0 +1,26 @@
+# Systemd-сервис. Положить в /etc/systemd/system/zakupki.service
+# и поправить User/WorkingDirectory под свой сервер.
+[Unit]
+Description=Бот закупок для MAX + панель заявок
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zakupki
+Group=zakupki
+WorkingDirectory=/opt/zakupki
+EnvironmentFile=/opt/zakupki/.env
+ExecStart=/opt/zakupki/.venv/bin/python -m bot.main
+Restart=always
+RestartSec=5
+
+# Немного изоляции
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/zakupki/data
+
+[Install]
+WantedBy=multi-user.target
