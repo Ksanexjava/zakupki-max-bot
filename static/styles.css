@@ -16,8 +16,9 @@
   --st-done: #7a46c9;
 }
 
+/* Тёмная тема: по настройке системы, если пользователь не выбрал светлую вручную */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #0f1115;
     --surface: #161a20;
     --surface-2: #1c2128;
@@ -34,6 +35,25 @@
     --st-ordered: #3fb950;
     --st-done: #a371f7;
   }
+}
+
+/* ...и по явному выбору переключателем в шапке */
+:root[data-theme="dark"] {
+  --bg: #0f1115;
+  --surface: #161a20;
+  --surface-2: #1c2128;
+  --border: #2b313a;
+  --border-soft: #232931;
+  --text: #e3e7ec;
+  --muted: #8b949e;
+  --accent: #5a9bf6;
+  --danger: #e5705f;
+
+  --st-new: #8b949e;
+  --st-in_progress: #4493f8;
+  --st-clarify: #d29922;
+  --st-ordered: #3fb950;
+  --st-done: #a371f7;
 }
 
 * { box-sizing: border-box; }
@@ -127,6 +147,39 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent); }
 .topbar-right { display: flex; align-items: center; gap: 8px; }
 .search { width: 260px; }
 .user { color: var(--muted); font-size: 13px; }
+
+.theme-toggle {
+  position: relative;
+  width: 48px;
+  height: 24px;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  cursor: pointer;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+}
+.theme-toggle:hover { border-color: var(--accent); }
+.theme-toggle svg { width: 12px; height: 12px; display: block; }
+.theme-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  transition: transform .15s ease;
+}
+:root[data-theme="dark"] .theme-knob { transform: translateX(24px); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .theme-knob { transform: translateX(24px); }
+}
 
 /* ---------------------------------------------------------------- табы */
 .tabs {

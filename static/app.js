@@ -446,6 +446,29 @@ el('search').addEventListener('input', (event) => {
 
 el('refresh-btn').addEventListener('click', () => loadList());
 
+/* ----------------------------------------------------------------- тема */
+
+function currentTheme() {
+  const chosen = document.documentElement.dataset.theme;
+  if (chosen === 'light' || chosen === 'dark') return chosen;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  el('theme-toggle').setAttribute('aria-checked', String(theme === 'dark'));
+  try {
+    localStorage.setItem('pb_theme', theme);
+  } catch (error) {
+    /* приватный режим — просто не запоминаем выбор */
+  }
+}
+
+el('theme-toggle').addEventListener('click', () => {
+  applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+});
+el('theme-toggle').setAttribute('aria-checked', String(currentTheme() === 'dark'));
+
 async function boot() {
   const meta = await api('/api/meta');
   state.statuses = meta.statuses;
