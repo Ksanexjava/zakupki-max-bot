@@ -1,128 +1,240 @@
-# Разворачивание на сервере (Ubuntu/Debian)
+# Разворачивание на сервере
 
-Два варианта: **Docker** (проще) или **systemd** (без докера).
-В обоих случаях наружу смотрит nginx с HTTPS, а приложение слушает только localhost.
+Пошагово: от чистого Ubuntu до работающего бота с панелью по HTTPS.
+Проект живёт в приватном репозитории, поэтому начинаем с доступа к нему.
+
+**Что понадобится:** сервер с Ubuntu 22.04+ и доступом по SSH, домен
+(желательно — без него панель будет работать по голому HTTP), токен бота.
+
+> **Важно про расположение сервера.** MAX — российский сервис. Если сервер
+> стоит за пределами РФ, подключение к `platform-api2.max.ru` может не
+> проходить. Проверяется за минуту командой из раздела «Проверка» — сделайте
+> это до того, как настраивать домен и сертификаты.
 
 ---
 
-## Вариант A. Docker
+## 0. Главное правило: один бот — один процесс
+
+Long polling отдаёт каждое событие **только одному** получателю. Если бот
+останется запущен на вашем Mac и одновременно поднимется на сервере, заявки
+начнут теряться: часть уйдёт туда, часть сюда.
+
+Поэтому перед запуском на сервере остановите локальный процесс (Ctrl+C
+в терминале с `run.sh`) — или заведите для сервера отдельного бота у @MasterBot
+и свой `.env`.
+
+---
+
+## 1. Доступ сервера к репозиторию
+
+Создаём на сервере ключ только для чтения этого репозитория:
 
 ```bash
-# 1. Залить проект на сервер
-ssh root@СЕРВЕР
-mkdir -p /opt/zakupki && cd /opt/zakupki
-# скопируйте сюда файлы проекта (rsync/scp/git clone)
-
-# 2. Настроить
-cp .env.example .env
-nano .env        # MAX_BOT_TOKEN, PANEL_USERS, SECRET_KEY, ADMIN_CODE,
-                 # PANEL_PUBLIC_URL=https://zakupki.ваш-домен.ру
-                 # PANEL_SECURE_COOKIE=true
-
-# 3. Запустить
-docker compose up -d --build
-
-# 4. Логи
-docker compose logs -f
+ssh-keygen -t ed25519 -C "zakupki-server" -f ~/.ssh/zakupki -N ""
+cat ~/.ssh/zakupki.pub
 ```
 
-Контейнер слушает `127.0.0.1:8080`, база и фотографии лежат в `./data` на хосте.
-Обновление после изменений: `docker compose up -d --build`.
-
-Если хотите, чтобы незаполненные анкеты переживали перезапуск, раскомментируйте
-в `compose.yaml` сервис `redis` и строку `REDIS_URL`.
-
----
-
-## Вариант B. systemd
+Вывод добавляем как deploy key. Проще всего **со своего Mac** (gh уже настроен):
 
 ```bash
-# 1. Пользователь и каталог
-sudo adduser --system --group --home /opt/zakupki zakupki
+gh repo deploy-key add ~/путь/к/zakupki.pub --repo Ksanexjava/zakupki-max-bot --title "prod-server"
+```
+
+либо вручную: GitHub → репозиторий → Settings → Deploy keys → Add deploy key
+(галочку «Allow write access» не ставим).
+
+Настраиваем на сервере ssh и клонируем:
+
+```bash
+cat >> ~/.ssh/config <<'EOF'
+Host github-zakupki
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/zakupki
+  IdentitiesOnly yes
+EOF
+
+sudo mkdir -p /opt/zakupki && sudo chown "$USER" /opt/zakupki
+git clone git@github-zakupki:Ksanexjava/zakupki-max-bot.git /opt/zakupki
 cd /opt/zakupki
-# скопируйте сюда файлы проекта
-
-# 2. Окружение (нужен Python 3.10+)
-sudo -u zakupki python3 -m venv .venv
-sudo -u zakupki .venv/bin/pip install -r requirements.txt
-
-# 3. Настройки
-sudo -u zakupki cp .env.example .env
-sudo -u zakupki nano .env
-sudo chmod 600 .env
-
-# 4. Сервис
-sudo cp deploy/zakupki.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now zakupki
-sudo systemctl status zakupki
-journalctl -u zakupki -f      # логи
 ```
 
 ---
 
-## nginx + HTTPS
+## 2. Настройки
 
 ```bash
-sudo apt install nginx certbot python3-certbot-nginx
-sudo cp deploy/nginx.conf.example /etc/nginx/sites-available/zakupki
-sudo nano /etc/nginx/sites-available/zakupki     # заменить zakupki.example.ru на свой домен
-sudo ln -s /etc/nginx/sites-available/zakupki /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-
-# сертификат Let's Encrypt
-sudo certbot --nginx -d zakupki.ваш-домен.ру
+cp .env.example .env
+python3 -c "import secrets; print(secrets.token_hex(32))"   # для SECRET_KEY
+nano .env
+chmod 600 .env
 ```
 
-После появления HTTPS обязательно в `.env`:
+Минимум, что надо заполнить:
+
+```
+MAX_BOT_TOKEN=токен от @MasterBot
+ADMIN_CODE=секретное слово для команды /admin
+PANEL_USERS="mike:пароль"
+SECRET_KEY=то, что выдала команда выше
+DISPLAY_TZ_OFFSET=3
+```
+
+Если уже знаете домен, сразу добавьте:
 
 ```
 PANEL_PUBLIC_URL=https://zakupki.ваш-домен.ру
 PANEL_SECURE_COOKIE=true
 ```
 
-и перезапустить (`docker compose up -d` или `systemctl restart zakupki`).
-
-> Без домена панель тоже работает — по `http://IP-сервера:8080`,
-> но тогда в `.env` нужно `PANEL_HOST=0.0.0.0`, а пароли пойдут по открытому HTTP.
-> Для постоянной работы лучше домен и сертификат.
-
 ---
 
-## Как дать доступ второму человеку
+## 3. Запуск: Docker или systemd
 
-1. В `.env` допишите его в `PANEL_USERS` через запятую:
-   `PANEL_USERS="mike:пароль1,ivan:пароль2"`
-2. Перезапустите сервис.
-3. Дайте ему адрес панели, логин и пароль.
-
-В истории каждой заявки видно, кто и когда менял статус, — имена берутся из логинов.
-
-Чтобы он ещё и получал уведомления о новых заявках в MAX, пусть напишет боту
-`/admin ВАШ_ADMIN_CODE`.
-
----
-
-## Бэкап
-
-Все данные — в папке `data`: файл базы `purchases.db` и фотографии в `media/`.
+### Вариант A. Docker (проще)
 
 ```bash
-# ежедневный бэкап в /var/backups (положить в cron)
-0 3 * * * tar czf /var/backups/zakupki-$(date +\%F).tgz -C /opt/zakupki data
+# если докера ещё нет
+curl -fsSL https://get.docker.com | sudo sh
+
+sudo docker compose up -d --build
+sudo docker compose logs -f
+```
+
+Контейнер слушает `127.0.0.1:8080`, база и картинки лежат в `./data` на хосте.
+
+Чтобы незаполненные анкеты переживали перезапуск, раскомментируйте в
+`compose.yaml` сервис `redis` и строку `REDIS_URL`.
+
+### Вариант B. systemd (без докера)
+
+```bash
+sudo apt update && sudo apt install -y python3-venv
+sudo adduser --system --group --home /opt/zakupki zakupki
+sudo chown -R zakupki:zakupki /opt/zakupki
+
+sudo -u zakupki python3 -m venv /opt/zakupki/.venv
+sudo -u zakupki /opt/zakupki/.venv/bin/pip install -r /opt/zakupki/requirements.txt
+
+sudo cp deploy/zakupki.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now zakupki
+systemctl status zakupki
+journalctl -u zakupki -f
+```
+
+Нужен Python 3.10 или новее — библиотека `maxapi` на 3.9 не ставится.
+
+---
+
+## 4. Проверка
+
+```bash
+# панель отвечает
+curl -s localhost:8080/healthz
+
+# связь с MAX: токен, /me, пробное сообщение
+cd /opt/zakupki && .venv/bin/python -m tools.check_bot ВАШ_USER_ID
+#   в докере:  sudo docker compose exec bot python -m tools.check_bot ВАШ_USER_ID
+```
+
+`ВАШ_USER_ID` подскажет сам бот по команде `/id`. Если шаг 2 (`GET /me`)
+не проходит — до MAX с этого сервера не достучаться, и дальше идти смысла нет.
+
+Затем в MAX: `/admin ВАШ_ADMIN_CODE` — чтобы уведомления о заявках приходили вам.
+
+---
+
+## 5. Домен и HTTPS
+
+```bash
+sudo apt install -y nginx certbot python3-certbot-nginx
+sudo cp deploy/nginx.conf.example /etc/nginx/sites-available/zakupki
+sudo nano /etc/nginx/sites-available/zakupki      # заменить zakupki.example.ru на свой домен
+sudo ln -s /etc/nginx/sites-available/zakupki /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+
+sudo certbot --nginx -d zakupki.ваш-домен.ру
+```
+
+A-запись домена должна указывать на IP сервера — иначе certbot не выдаст сертификат.
+
+После появления HTTPS в `.env`:
+
+```
+PANEL_PUBLIC_URL=https://zakupki.ваш-домен.ру
+PANEL_SECURE_COOKIE=true
+```
+
+и перезапустить: `sudo docker compose up -d` либо `sudo systemctl restart zakupki`.
+
+Если фаервол включён:
+
+```bash
+sudo ufw allow OpenSSH
+sudo ufw allow 'Nginx Full'
+sudo ufw enable
+```
+
+Порт 8080 наружу открывать не нужно: приложение слушает только localhost,
+снаружи его показывает nginx.
+
+> Без домена панель доступна по `http://IP-сервера:8080`, но тогда в `.env`
+> нужно `PANEL_HOST=0.0.0.0`, а логин с паролем пойдут по открытому HTTP.
+> Так можно проверить работу, но не стоит оставлять надолго.
+
+---
+
+## 6. Обновление
+
+```bash
+cd /opt/zakupki
+git pull
+
+# Docker
+sudo docker compose up -d --build
+
+# systemd
+sudo -u zakupki .venv/bin/pip install -r requirements.txt
+sudo -u zakupki .venv/bin/python -m pytest tests -q
+sudo systemctl restart zakupki
+```
+
+`.env` и папка `data` в репозитории не лежат, `git pull` их не трогает.
+
+---
+
+## 7. Бэкап
+
+Все данные — в папке `data`: база `purchases.db`, фотографии и скриншоты в `media/`.
+
+```bash
+# ежедневно в 3:00, хранить 14 копий (crontab -e)
+0 3 * * * tar czf /var/backups/zakupki-$(date +\%F).tgz -C /opt/zakupki data && find /var/backups -name 'zakupki-*.tgz' -mtime +14 -delete
 ```
 
 Восстановление: распаковать `data` обратно и перезапустить сервис.
 
 ---
 
-## Обновление и обслуживание
+## 8. Обслуживание
 
 | Задача | Команда |
 |---|---|
-| Логи (docker) | `docker compose logs -f` |
+| Логи (Docker) | `sudo docker compose logs -f` |
 | Логи (systemd) | `journalctl -u zakupki -f` |
-| Перезапуск | `docker compose restart` / `sudo systemctl restart zakupki` |
-| Проверка живости | `curl -s localhost:8080/healthz` |
-| Тесты перед обновлением | `.venv/bin/python -m pytest tests -q` |
-| Сменить пароль панели | поправить `PANEL_USERS` в `.env` и перезапустить |
+| Перезапуск | `sudo docker compose restart` / `sudo systemctl restart zakupki` |
+| Живость панели | `curl -s localhost:8080/healthz` |
+| Связь с MAX | `.venv/bin/python -m tools.check_bot` |
+| Тесты | `.venv/bin/python -m pytest tests -q` |
+| Второй человек в панели | дописать в `PANEL_USERS` через запятую и перезапустить |
+
+### Если что-то не работает
+
+| Симптом | Причина и что делать |
+|---|---|
+| `Связь с MAX потеряна` в логах | Сервер не достучался до API. Проверьте `tools.check_bot`, при необходимости задайте `MAX_API_BASE` |
+| Бот молчит, заявки не доходят | Где-то ещё запущен второй процесс с тем же токеном |
+| В панель не пускает | Пустой или неверный `PANEL_USERS`; после правки нужен перезапуск |
+| Разлогинивает после перезапуска | Не задан `SECRET_KEY` — он генерируется заново при каждом старте |
+| Уведомления автору не уходят | Смотрите текст ошибки в тосте панели и в логах |
