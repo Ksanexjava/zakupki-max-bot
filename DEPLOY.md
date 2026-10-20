@@ -25,7 +25,70 @@ Long polling отдаёт каждое событие **только одном�
 
 ---
 
-## 1. Доступ сервера к репозиторию
+## 1. Как положить проект на сервер
+
+Три способа, от самого простого.
+
+### Способ 1. Скопировать папку с Mac (ничего настраивать не нужно)
+
+Выполняется **на Mac**, в своём терминале:
+
+```bash
+# создать папку на сервере
+ssh ПОЛЬЗОВАТЕЛЬ@АДРЕС_СЕРВЕРА 'sudo mkdir -p /opt/zakupki && sudo chown $USER /opt/zakupki'
+
+# скопировать проект (вместе с .env — настройки сразу приедут)
+rsync -av --exclude '.venv' --exclude '.git' --exclude 'data' --exclude '__pycache__' \
+  "/Users/mac/Documents/Бот для закупок/" ПОЛЬЗОВАТЕЛЬ@АДРЕС_СЕРВЕРА:/opt/zakupki/
+```
+
+Папка `data` намеренно не копируется: на сервере база заведётся своя, чистая.
+Обновлять потом — той же командой `rsync`.
+
+### Способ 2. Временно открыть репозиторий
+
+Сделать репозиторий публичным, склонировать на сервере и закрыть обратно:
+
+```bash
+# на Mac
+gh repo edit Ksanexjava/zakupki-max-bot --visibility public --accept-visibility-change-consequences
+
+# на сервере
+sudo mkdir -p /opt/zakupki && sudo chown $USER /opt/zakupki
+git clone https://github.com/Ksanexjava/zakupki-max-bot.git /opt/zakupki
+
+# снова на Mac
+gh repo edit Ksanexjava/zakupki-max-bot --visibility private --accept-visibility-change-consequences
+```
+
+Секретов в репозитории нет (`.env` и `data` туда не попадают), так что за
+несколько минут открытости вы рискуете только самим кодом. Минус: после
+закрытия `git pull` на сервере перестанет работать — для обновлений
+понадобится способ 1 или 3.
+
+### Способ 3. Авторизовать сервер в GitHub (если хотите обновляться через `git pull`)
+
+На сервере:
+
+```bash
+sudo apt install -y gh    # либо: https://github.com/cli/cli#installation
+gh auth login             # выбрать GitHub.com → HTTPS → Login with a web browser
+```
+
+Команда покажет короткий код, его надо ввести в браузере на любом устройстве.
+Файлы ключей создавать не нужно. После этого:
+
+```bash
+sudo mkdir -p /opt/zakupki && sudo chown $USER /opt/zakupki
+gh repo clone Ksanexjava/zakupki-max-bot /opt/zakupki
+```
+
+Дальше обновления — обычный `git pull`.
+
+<details>
+<summary>Способ 4. Deploy key (для тех, кому привычнее ssh-ключи)</summary>
+
+
 
 Создаём на сервере ключ только для чтения этого репозитория:
 
@@ -58,6 +121,8 @@ sudo mkdir -p /opt/zakupki && sudo chown "$USER" /opt/zakupki
 git clone git@github-zakupki:Ksanexjava/zakupki-max-bot.git /opt/zakupki
 cd /opt/zakupki
 ```
+
+</details>
 
 ---
 
@@ -187,6 +252,8 @@ sudo ufw enable
 
 ## 6. Обновление
 
+Если клонировали через git (способы 2–4):
+
 ```bash
 cd /opt/zakupki
 git pull
@@ -200,7 +267,11 @@ sudo -u zakupki .venv/bin/python -m pytest tests -q
 sudo systemctl restart zakupki
 ```
 
-`.env` и папка `data` в репозитории не лежат, `git pull` их не трогает.
+Если копировали папкой — повторите ту же команду `rsync` с Mac, а потом
+перезапустите сервис на сервере.
+
+`.env` и папка `data` в репозитории не лежат — ни `git pull`, ни `rsync`
+(с указанными исключениями) их не затирают.
 
 ---
 
