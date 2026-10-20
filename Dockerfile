@@ -11,7 +11,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 COPY . .
-RUN useradd --create-home appuser && mkdir -p /data && chown -R appuser /data /app
+# uid фиксируем: папку data на хосте надо отдать этому же пользователю
+RUN useradd --create-home --uid 1000 appuser && mkdir -p /data && chown -R appuser /data /app
 USER appuser
 VOLUME ["/data"]
 EXPOSE 8080

@@ -162,9 +162,15 @@ PANEL_SECURE_COOKIE=true
 # если докера ещё нет
 curl -fsSL https://get.docker.com | sudo sh
 
+# папка под базу и картинки; uid 1000 — пользователь внутри контейнера
+mkdir -p data && sudo chown -R 1000:1000 data
+
 sudo docker compose up -d --build
 sudo docker compose logs -f
 ```
+
+Если домена пока нет и панель нужна по IP, добавьте в `.env` строку
+`PANEL_BIND=0.0.0.0` — тогда порт 8080 будет открыт наружу.
 
 Контейнер слушает `127.0.0.1:8080`, база и картинки лежат в `./data` на хосте.
 
