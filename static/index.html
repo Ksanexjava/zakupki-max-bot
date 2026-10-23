@@ -56,9 +56,18 @@
   <nav class="tabs" id="tabs"></nav>
 
   <main class="content">
+    <div class="bulkbar" id="bulkbar" hidden>
+      <span class="bulk-count" id="bulk-count"></span>
+      <div class="bulk-statuses" id="bulk-statuses"></div>
+      <input type="text" id="bulk-comment" class="bulk-comment" placeholder="Комментарий автору (необязательно)">
+      <button class="btn btn-danger" id="bulk-delete">Удалить</button>
+      <button class="btn btn-quiet" id="bulk-clear">Снять выделение</button>
+    </div>
+
     <table class="requests">
       <thead>
         <tr>
+          <th class="col-check"><input type="checkbox" id="check-all" title="Выбрать все"></th>
           <th class="col-num">№</th>
           <th>Товар</th>
           <th class="col-who">Кто заказывает</th>

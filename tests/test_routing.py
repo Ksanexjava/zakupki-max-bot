@@ -29,11 +29,12 @@ def test_dialog_through_dispatcher():
             bot_started_event(bot),
             callback_event(bot, "menu:new"),
             callback_event(bot, "form:self"),
+            callback_event(bot, "form:mode:one"),
             message_event(bot, "Лампа настольная Xiaomi"),
             message_event(bot, "3 шт"),
+            message_event(bot, "https://ozon.ru/product/lampa"),
             callback_event(bot, "form:deadline:month"),
             message_event(bot, "В переговорную, темно по вечерам"),
-            message_event(bot, "https://ozon.ru/product/lampa"),
             callback_event(bot, "form:submit"),
         ]
         for event in events:
@@ -124,11 +125,12 @@ def test_new_request_notifies_admin_from_env():
         for event in [
             callback_event(bot, "menu:new"),
             callback_event(bot, "form:self"),
+            callback_event(bot, "form:mode:one"),
             message_event(bot, "Бумага А4"),
             message_event(bot, "5 пачек"),
+            callback_event(bot, "form:skip"),
             callback_event(bot, "form:deadline:urgent"),
             message_event(bot, "Закончилась в принтере"),
-            callback_event(bot, "form:skip"),
             callback_event(bot, "form:submit"),
         ]:
             await dp.handle(event)
@@ -154,15 +156,16 @@ def test_requester_other_person():
         assert "Впишите ФИО" in bot.messages[-1]["text"]
 
         await dp.handle(message_event(bot, "Иванова Мария, бухгалтерия"))
-        # дальше идёт шаг 2 — значит ФИО приняли
-        assert "Что нужно заказать" in bot.messages[-1]["text"]
+        # дальше идёт развилка о количестве позиций — значит ФИО приняли
+        assert "Сколько позиций" in bot.messages[-1]["text"]
 
         for event in [
+            callback_event(bot, "form:mode:one"),
             message_event(bot, "Степлер"),
             message_event(bot, "1 шт"),
+            callback_event(bot, "form:skip"),
             callback_event(bot, "form:deadline:any"),
             message_event(bot, "Нечем скреплять документы"),
-            callback_event(bot, "form:skip"),
             callback_event(bot, "form:submit"),
         ]:
             await dp.handle(event)
@@ -181,6 +184,8 @@ def test_requester_self_button_still_works():
         dp = build(bot)
         await dp.handle(callback_event(bot, "menu:new"))
         await dp.handle(callback_event(bot, "form:self"))
+        assert "Сколько позиций" in bot.messages[-1]["text"]
+        await dp.handle(callback_event(bot, "form:mode:one"))
         assert "Что нужно заказать" in bot.messages[-1]["text"]
 
     asyncio.run(scenario())

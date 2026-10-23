@@ -6,7 +6,7 @@ from sqlalchemy import func, inspect as sa_inspect, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.statuses import DEFAULT_STATUS
-from db.models import Admin, Attachment, Request, StatusHistory, utcnow
+from db.models import Admin, Attachment, Item, Request, StatusHistory, utcnow
 from db.session import Session
 
 # ------------------------------------------------------------------ заявки
@@ -18,13 +18,62 @@ FORM_FIELDS = (
 )
 
 
+def normalize_items(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Приводит позиции к единому виду.
+
+    Заявка может прийти со списком `items`, а может — в старом формате,
+    где товар лежал прямо в полях заявки. Второй вариант превращаем
+    в список из одной позиции.
+    """
+    raw = data.get("items")
+    if not raw:
+        raw = [
+            {
+                "name": data.get("item") or "",
+                "quantity": data.get("quantity") or "",
+                "link": data.get("example_url"),
+                "photo_token": data.get("photo_token"),
+                "photo_file": data.get("photo_file"),
+            }
+        ]
+    items: list[dict[str, Any]] = []
+    for number, item in enumerate(raw, start=1):
+        name = (item.get("name") or "").strip()
+        if not name:
+            continue
+        items.append(
+            {
+                "position": number,
+                "name": name,
+                "quantity": (item.get("quantity") or "").strip(),
+                "link": item.get("link") or None,
+                "photo_token": item.get("photo_token"),
+                "photo_file": item.get("photo_file"),
+            }
+        )
+    return items
+
+
 async def create_request(data: dict[str, Any]) -> Request:
     """Создаёт заявку со статусом «Не просмотрено» и первой записью в истории."""
     payload = {key: data.get(key) for key in FORM_FIELDS}
     for key in ("quantity", "deadline", "purpose"):
         payload[key] = payload.get(key) or ""
+
+    items = normalize_items(data)
+    if items:
+        # заголовок заявки — первая позиция
+        payload["item"] = items[0]["name"]
+        payload["quantity"] = items[0]["quantity"]
+        if len(items) == 1:
+            payload["example_url"] = items[0]["link"]
+            payload["photo_token"] = items[0]["photo_token"]
+            payload["photo_file"] = items[0]["photo_file"]
+
     async with Session() as session:
         request = Request(**payload, status=DEFAULT_STATUS)
+        for item in items:
+            request.items.append(Item(**item))
         request.history.append(
             StatusHistory(
                 actor=data.get("author_name") or "бот",
@@ -62,6 +111,8 @@ async def list_requests(
             Request.requester.ilike(like),
             Request.purpose.ilike(like),
             Request.author_name.ilike(like),
+            # ищем и по названиям позиций внутри заявки
+            Request.id.in_(select(Item.request_id).where(Item.name.ilike(like))),
         ]
         if query.isdigit():
             conditions.append(Request.id == int(query))
@@ -124,6 +175,7 @@ async def delete_request(request_id: int) -> dict[str, Any] | None:
             return None
         data = to_dict(request)
         data["files"] = [item.filename for item in request.attachments]
+        data["files"] += [item.photo_file for item in request.items if item.photo_file]
         if request.photo_file:
             data["files"].append(request.photo_file)
         await session.delete(request)
@@ -181,13 +233,30 @@ async def is_admin(user_id: int, extra: Sequence[int] = ()) -> bool:
 
 # -------------------------------------------------- сериализация для панели
 
+def item_to_dict(item: Item) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "position": item.position,
+        "name": item.name,
+        "quantity": item.quantity,
+        "link": item.link,
+        "photo_file": item.photo_file,
+        "photo_url": f"/media/{item.photo_file}" if item.photo_file else None,
+        "bought": bool(item.bought),
+    }
+
+
 def to_dict(request: Request) -> dict[str, Any]:
     """Заявка в виде обычного словаря — для JSON панели и текстов бота."""
-    # связь может быть ещё не подгружена (например, сразу после создания)
+    # связи могут быть ещё не подгружены (например, сразу после создания)
     unloaded = sa_inspect(request).unloaded
     attachments_count = 0 if "attachments" in unloaded else len(request.attachments)
+    items = [] if "items" in unloaded else [item_to_dict(i) for i in request.items]
     return {
         "attachments_count": attachments_count,
+        "items": items,
+        "items_count": len(items),
+        "bought_count": sum(1 for i in items if i["bought"]),
         "id": request.id,
         "created_at": request.created_at,
         "updated_at": request.updated_at,
@@ -270,3 +339,70 @@ def attachment_to_dict(item: Attachment) -> dict[str, Any]:
         "uploaded_at": item.uploaded_at,
         "url": f"/media/{item.filename}",
     }
+
+
+# ------------------------------------------------------------- позиции
+
+async def set_item_bought(item_id: int, bought: bool) -> dict[str, Any] | None:
+    """Отмечает позицию купленной (или снимает отметку). Статус заявки не трогает."""
+    async with Session() as session:
+        item = await session.get(Item, item_id)
+        if item is None:
+            return None
+        item.bought = bought
+        item.bought_at = utcnow() if bought else None
+        await session.commit()
+        await session.refresh(item)
+        return {**item_to_dict(item), "request_id": item.request_id}
+
+
+# --------------------------------------------------- массовые операции
+
+async def bulk_set_status(
+    request_ids: Sequence[int],
+    status: str,
+    actor: str,
+    comment: str | None = None,
+) -> list[tuple[dict[str, Any], str]]:
+    """Меняет статус у нескольких заявок за один заход.
+
+    Возвращает список пар (заявка после изменения, прежний статус) —
+    только для тех, где статус действительно поменялся или добавлен комментарий.
+    """
+    changed: list[tuple[dict[str, Any], str]] = []
+    if not request_ids:
+        return changed
+    async with Session() as session:
+        found = (
+            await session.execute(select(Request).where(Request.id.in_(list(request_ids))))
+        ).scalars().all()
+        for request in found:
+            previous = request.status
+            if previous == status and not comment:
+                continue
+            request.status = status
+            request.updated_at = utcnow()
+            if comment:
+                request.admin_comment = comment
+            session.add(
+                StatusHistory(
+                    request_id=request.id,
+                    actor=actor,
+                    from_status=previous,
+                    to_status=status,
+                    comment=comment,
+                )
+            )
+            changed.append((to_dict(request), previous))
+        await session.commit()
+    return changed
+
+
+async def bulk_delete(request_ids: Sequence[int]) -> list[dict[str, Any]]:
+    """Удаляет несколько заявок. Возвращает их данные (там же список файлов)."""
+    deleted: list[dict[str, Any]] = []
+    for request_id in request_ids:
+        data = await delete_request(request_id)
+        if data is not None:
+            deleted.append(data)
+    return deleted

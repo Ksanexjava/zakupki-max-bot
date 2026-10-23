@@ -9,6 +9,8 @@ const state = {
   counts: {},
   total: 0,
   openId: null,        // какая заявка открыта в модальном окне
+  selected: new Set(), // отмеченные галочками заявки
+  lastIndex: null,     // для выбора диапазона с Shift
   knownIds: new Set(),
   firstLoad: true,
 };
@@ -112,13 +114,17 @@ function renderTabs() {
 
 /* --------------------------------------------------------------- таблица */
 
-function rowHtml(row) {
+function rowHtml(row, index) {
   const marks = [];
+  if (row.items_count > 1) marks.push(`позиций ${row.items_count}`);
+  if (row.items_count > 1 && row.bought_count) marks.push(`куплено ${row.bought_count}`);
   if (row.example_url) marks.push('ссылка');
   if (row.photo_href) marks.push('фото');
   if (row.attachments_count) marks.push(`скрин. ${row.attachments_count}`);
+  const checked = state.selected.has(row.id) ? 'checked' : '';
   return `
-    <tr data-id="${row.id}">
+    <tr data-id="${row.id}" data-index="${index}">
+      <td class="cell-check"><input type="checkbox" data-check="${row.id}" ${checked}></td>
       <td class="cell-num">${row.id}</td>
       <td>
         <div class="cell-item">${esc(row.item)}${marks.length ? `<span class="cell-mark">${esc(marks.join(' · '))}</span>` : ''}</div>
@@ -133,13 +139,112 @@ function rowHtml(row) {
 }
 
 function renderList() {
-  el('rows').innerHTML = state.requests.map(rowHtml).join('');
+  el('rows').innerHTML = state.requests.map((row, index) => rowHtml(row, index)).join('');
   el('empty').hidden = state.requests.length > 0;
   document.querySelector('.requests').hidden = state.requests.length === 0;
   el('rows').querySelectorAll('tr').forEach((tr) => {
-    tr.addEventListener('click', () => openRequest(Number(tr.dataset.id)));
+    tr.addEventListener('click', (event) => {
+      if (event.target.closest('.cell-check')) return;   // клик по галочке не открывает карточку
+      openRequest(Number(tr.dataset.id));
+    });
+  });
+  el('rows').querySelectorAll('[data-check]').forEach((box) => {
+    box.addEventListener('click', (event) => {
+      const id = Number(box.dataset.check);
+      const index = Number(box.closest('tr').dataset.index);
+      if (event.shiftKey && state.lastIndex !== null) {
+        const [from, to] = [state.lastIndex, index].sort((a, b) => a - b);
+        state.requests.slice(from, to + 1).forEach((row) => {
+          if (box.checked) state.selected.add(row.id); else state.selected.delete(row.id);
+        });
+      } else if (box.checked) {
+        state.selected.add(id);
+      } else {
+        state.selected.delete(id);
+      }
+      state.lastIndex = index;
+      renderList();
+    });
+  });
+  renderBulkbar();
+}
+
+/* ------------------------------------------------- массовые действия */
+
+function renderBulkbar() {
+  const bar = el('bulkbar');
+  const count = state.selected.size;
+  bar.hidden = count === 0;
+  const visible = state.requests.map((row) => row.id);
+  el('check-all').checked = count > 0 && visible.every((id) => state.selected.has(id));
+  if (!count) return;
+
+  el('bulk-count').textContent = `Выбрано: ${count}`;
+  el('bulk-statuses').innerHTML = state.statuses.map((s) => `
+    <button class="btn" data-bulk-status="${esc(s.key)}">
+      <span class="dot" style="--st: var(--st-${esc(s.key)})"></span> ${esc(s.label)}
+    </button>`).join('');
+  el('bulk-statuses').querySelectorAll('[data-bulk-status]').forEach((button) => {
+    button.addEventListener('click', () => bulkStatus(button.dataset.bulkStatus));
   });
 }
+
+el('check-all').addEventListener('change', (event) => {
+  state.requests.forEach((row) => {
+    if (event.target.checked) state.selected.add(row.id); else state.selected.delete(row.id);
+  });
+  state.lastIndex = null;
+  renderList();
+});
+
+el('bulk-clear').addEventListener('click', () => {
+  state.selected.clear();
+  state.lastIndex = null;
+  renderList();
+});
+
+async function bulkStatus(status) {
+  const ids = [...state.selected];
+  const comment = el('bulk-comment').value.trim();
+  const result = await api('/api/requests/bulk-status', {
+    method: 'POST',
+    body: JSON.stringify({ ids, status, comment }),
+  });
+  const label = statusMeta(status).label;
+  toast(result.changed
+    ? `Статус «${label}» у ${result.changed} заявок. Уведомлено авторов: ${result.authors_notified}.`
+      + (result.notify_error ? ` Ошибка отправки: ${result.notify_error}` : '')
+    : 'Ничего не изменилось — этот статус уже стоял');
+  el('bulk-comment').value = '';
+  state.selected.clear();
+  await loadList();
+}
+
+el('bulk-delete').addEventListener('click', async () => {
+  const button = el('bulk-delete');
+  if (button.dataset.armed !== '1') {
+    button.dataset.armed = '1';
+    button.textContent = `Точно удалить ${state.selected.size}? Нажмите ещё раз`;
+    button.classList.add('bulk-confirm');
+    setTimeout(() => {
+      button.dataset.armed = '';
+      button.textContent = 'Удалить';
+      button.classList.remove('bulk-confirm');
+    }, 4000);
+    return;
+  }
+  const ids = [...state.selected];
+  const result = await api('/api/requests/bulk-delete', {
+    method: 'POST',
+    body: JSON.stringify({ ids }),
+  });
+  toast(`Удалено заявок: ${result.deleted}`);
+  button.dataset.armed = '';
+  button.textContent = 'Удалить';
+  button.classList.remove('bulk-confirm');
+  state.selected.clear();
+  await loadList();
+});
 
 async function loadList(silent = false) {
   const params = new URLSearchParams();
@@ -156,6 +261,9 @@ async function loadList(silent = false) {
   }
   incoming.forEach((id) => state.knownIds.add(id));
   state.firstLoad = false;
+
+  const alive = new Set(data.requests.map((row) => row.id));
+  [...state.selected].forEach((id) => { if (!alive.has(id)) state.selected.delete(id); });
 
   state.requests = data.requests;
   state.counts = data.counts;
@@ -179,13 +287,37 @@ function shotHtml(item) {
     </div>`;
 }
 
-function modalHtml(row, history, attachments) {
-  const example = row.example_url
-    ? (row.example_is_link
-      ? `<a href="${esc(row.example_url)}" target="_blank" rel="noopener">${esc(row.example_url)}</a>`
-      : esc(row.example_url))
-    : '<span class="muted">не приложен</span>';
+function itemHtml(item) {
+  const meta = [];
+  if (item.quantity) meta.push(esc(item.quantity));
+  if (item.link) {
+    meta.push(`<a href="${esc(item.link)}" target="_blank" rel="noopener">${esc(item.link)}</a>`);
+  }
+  return `
+    <li class="${item.bought ? 'bought' : ''}" data-row="${item.id}">
+      <input type="checkbox" data-item="${item.id}" ${item.bought ? 'checked' : ''}
+             title="Отметить купленным">
+      <div class="item-body">
+        <div class="item-name">${item.position}. ${esc(item.name)}</div>
+        ${meta.length ? `<div class="item-meta">${meta.join(' · ')}</div>` : ''}
+      </div>
+      ${item.photo_url
+        ? `<a href="${esc(item.photo_url)}" target="_blank" rel="noopener">
+             <img class="item-photo" src="${esc(item.photo_url)}" alt="Фото позиции"></a>`
+        : ''}
+    </li>`;
+}
 
+function itemsTitle(row) {
+  const total = row.items_count || 0;
+  if (total <= 1) return 'Позиция';
+  return row.bought_count
+    ? `Позиции · куплено ${row.bought_count} из ${total}`
+    : `Позиции (${total})`;
+}
+
+function modalHtml(row, history, attachments) {
+  const items = row.items || [];
   const author = `${esc(row.author_name || '—')}${row.author_username ? ` (@${esc(row.author_username)})` : ''}`;
 
   const fromBot = row.photo_href
@@ -216,19 +348,23 @@ function modalHtml(row, history, attachments) {
   }).join('');
 
   return `
-    <div class="modal-title-item">${esc(row.item)}</div>
+    <div class="modal-title-item">${esc(row.item)}${row.items_count > 1
+      ? `<span class="muted"> и ещё ${row.items_count - 1}</span>` : ''}</div>
 
     <dl class="fields">
       <div class="field"><dt>Кто заказывает</dt><dd>${esc(row.requester)}</dd></div>
-      <div class="field"><dt>Количество</dt><dd>${esc(row.quantity || '—')}</dd></div>
       <div class="field"><dt>Нужно к сроку</dt><dd>${esc(row.deadline || '—')}</dd></div>
       <div class="field"><dt>Цель</dt><dd>${esc(row.purpose)}</dd></div>
-      <div class="field"><dt>Пример от заказчика</dt><dd>${example}</dd></div>
       <div class="field"><dt>Оформил в MAX</dt><dd>${author}</dd></div>
       <div class="field"><dt>Создана</dt><dd>${esc(row.created_at_human)}</dd></div>
       <div class="field"><dt>Изменена</dt><dd>${esc(row.updated_at_human)}</dd></div>
       ${row.admin_comment ? `<div class="field"><dt>Комментарий</dt><dd>${esc(row.admin_comment)}</dd></div>` : ''}
     </dl>
+
+    <div class="section">
+      <div class="section-title" id="items-title">${esc(itemsTitle(row))}</div>
+      <ul class="items" id="items">${items.map(itemHtml).join('')}</ul>
+    </div>
 
     <div class="section">
       <div class="section-title">Скриншоты заказа</div>
@@ -288,6 +424,10 @@ async function openRequest(id) {
   el('modal-body').querySelectorAll('.status-btn').forEach((button) => {
     button.addEventListener('click', () => setStatus(id, button.dataset.status));
   });
+  el('items').querySelectorAll('[data-item]').forEach((box) => {
+    box.addEventListener('change', () => toggleBought(id, Number(box.dataset.item), box.checked));
+  });
+
   el('comment-only-btn').addEventListener('click', () => saveComment(id));
 
   const askDelete = el('delete-btn');
@@ -386,6 +526,17 @@ async function uploadFiles(id, files) {
     await openRequest(id);
     await loadList();
   }
+}
+
+async function toggleBought(requestId, itemId, bought) {
+  const result = await api(`/api/items/${itemId}/bought`, {
+    method: 'POST',
+    body: JSON.stringify({ bought }),
+  });
+  const row = document.querySelector(`[data-row="${itemId}"]`);
+  if (row) row.classList.toggle('bought', bought);
+  if (result.request) el('items-title').textContent = itemsTitle(result.request);
+  await loadList();
 }
 
 async function removeAttachment(id, attachmentId) {

@@ -236,7 +236,46 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent); }
 .requests tbody tr { cursor: pointer; }
 .requests tbody tr:hover { background: var(--surface-2); }
 
+.col-check { width: 34px; }
 .col-num { width: 56px; }
+.cell-check { cursor: default; }
+.requests input[type="checkbox"] { cursor: pointer; width: 15px; height: 15px; }
+
+/* полоска массовых действий */
+.bulkbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+}
+.bulk-count { font-weight: 600; white-space: nowrap; }
+.bulk-statuses { display: flex; gap: 6px; flex-wrap: wrap; }
+.bulk-comment { flex: 1; min-width: 200px; }
+.bulk-confirm { color: var(--danger); }
+
+/* позиции заявки */
+.items { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.items li {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+}
+.items li.bought { background: var(--surface-2); }
+.items li.bought .item-name { text-decoration: line-through; color: var(--muted); }
+.items input[type="checkbox"] { margin-top: 3px; width: 15px; height: 15px; cursor: pointer; }
+.item-body { flex: 1; min-width: 0; }
+.item-name { font-weight: 500; overflow-wrap: anywhere; }
+.item-meta { color: var(--muted); font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
+.item-meta a { color: var(--accent); }
+.item-photo { width: 54px; height: 42px; object-fit: cover; border: 1px solid var(--border); border-radius: 4px; }
 .cell-num { color: var(--muted); font-variant-numeric: tabular-nums; }
 .cell-item { font-weight: 600; }
 .cell-purpose { color: var(--muted); margin-top: 2px; font-size: 13px; }

@@ -74,6 +74,32 @@ DEMO = [
     ),
     (
         {
+            "requester": "ЛуЧиК СвЕтА",
+            "deadline": "Срочно, сегодня-завтра",
+            "purpose": "Расходники для уборки в отделениях",
+            "author_user_id": 1006,
+            "author_name": "Светлана Лучик",
+            "author_username": "luchik",
+            "author_chat_id": 1006,
+            "items": [
+                {"name": "Гель для стирки Ariel, 1.3 л", "quantity": "10 шт",
+                 "link": "https://ozon.ru/t/gel"},
+                {"name": "Пемолюкс Лимон порошок 480 г", "quantity": "10 шт",
+                 "link": "https://ozon.ru/t/7GCmbpF"},
+                {"name": "MR PROPER моющая жидкость для полов, Лимон 1.5 л", "quantity": "10 шт",
+                 "link": "https://ozon.ru/t/D4VEheL"},
+                {"name": "Жидкое мыло ABSOLUT антибактериальное, 5 л", "quantity": "2 шт",
+                 "link": "https://ozon.ru/t/5DFw6mw"},
+                {"name": "Средство для мытья посуды AOS Османтус, 4,8 кг", "quantity": "5 шт",
+                 "link": "https://ozon.ru/t/V2fR8Ue"},
+                {"name": "Перчатки рабочие х/б с ПВХ-точкой, размер 10", "quantity": "20 пар"},
+            ],
+        },
+        "in_progress",
+        None,
+    ),
+    (
+        {
             "requester": "Орлова Елена, маркетинг",
             "item": "Кофе в зёрнах Lavazza Crema e Aroma, 1 кг",
             "quantity": "4 упаковки",

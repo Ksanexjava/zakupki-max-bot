@@ -37,6 +37,13 @@ STEP_REQUESTER_OTHER = (
     "✍️ Впишите ФИО того, для кого осуществляется заказ.\n\n"
     "Лучше с отделом — например: «Иванова Мария, бухгалтерия»."
 )
+
+ASK_MODE = (
+    "🧾 **Сколько позиций в заявке?**\n\n"
+    "Если нужен один товар — «Одна позиция».\n"
+    "Если список — можно добавлять по очереди или вставить всё сразу."
+)
+
 STEP_ITEM = (
     "📦 Шаг 2 из 6. **Что нужно заказать?**\n\n"
     "Название товара как можно точнее — например: «Чайник электрический Bosch, 1.7 л»."
@@ -45,20 +52,81 @@ STEP_QUANTITY = (
     "🔢 Шаг 3 из 6. **Сколько нужно?**\n\n"
     "Например: «1 шт», «5 упаковок», «2 коробки по 10 шт»."
 )
-STEP_DEADLINE = (
-    "📅 Шаг 4 из 6. **К какому сроку нужно?**\n\n"
-    "Выберите вариант кнопкой или напишите дату своими словами."
-)
-STEP_PURPOSE = (
-    "🎯 Шаг 5 из 6. **Зачем это нужно?**\n\n"
-    "Коротко: для чего и кому — например «для кухни в офисе, старый сломался». "
-    "Это главный пункт: по нему решают, нужна ли закупка."
-)
 STEP_EXAMPLE = (
-    "🔗 Шаг 6 из 6. **Пример товара** (необязательно)\n\n"
+    "🔗 Шаг 4 из 6. **Пример товара** (необязательно)\n\n"
     "Пришлите ссылку (Ozon, Wildberries, сайт поставщика) или фото.\n"
     "Если примера нет — нажмите «Пропустить»."
 )
+STEP_DEADLINE = (
+    "📅 Шаг 5 из 6. **К какому сроку нужно?**\n\n"
+    "Выберите вариант кнопкой или напишите дату своими словами."
+)
+STEP_PURPOSE = (
+    "🎯 Шаг 6 из 6. **Зачем это нужно?**\n\n"
+    "Коротко: для чего и кому — например «для кухни в офисе, старый сломался». "
+    "Это главный пункт: по нему решают, нужна ли закупка."
+)
+
+#: те же вопросы без нумерации — для заявок со списком позиций,
+#: где человек не проходил шаги 2-4 по порядку
+STEP_DEADLINE_PLAIN = STEP_DEADLINE.replace("📅 Шаг 5 из 6. ", "📅 ")
+STEP_PURPOSE_PLAIN = STEP_PURPOSE.replace("🎯 Шаг 6 из 6. ", "🎯 ")
+
+# --- вопросы по каждой позиции, когда их несколько ---
+
+def pos_item(number: int) -> str:
+    return (
+        f"📦 **Позиция {number}. Что нужно заказать?**\n\n"
+        "Название товара как можно точнее."
+    )
+
+
+def pos_quantity(number: int, name: str) -> str:
+    return f"🔢 **Позиция {number}. Сколько нужно?**\n\n«{name}»"
+
+
+def pos_example(number: int) -> str:
+    return (
+        f"🔗 **Позиция {number}. Ссылка или фото** (необязательно)\n\n"
+        "Если примера нет — нажмите «Пропустить»."
+    )
+
+
+def ask_more(count: int) -> str:
+    return (
+        f"✅ Позиций в заявке: {count}.\n\n"
+        "Добавить ещё одну или перейти к сроку и цели?"
+    )
+
+
+ASK_LIST = (
+    "📋 **Пришлите список одним сообщением**\n\n"
+    "Каждая позиция с новой строки. Ссылку можно вставлять прямо в строку, "
+    "количество — в конце, например:\n\n"
+    "`Гель для стирки — 10 шт https://ozon.ru/...`\n"
+    "`Перчатки х/б, размер 10 — 20 пар`\n"
+    "`Чайник Bosch 1.7 л`\n\n"
+    "Если количество не укажете, я спрошу отдельно."
+)
+LIST_EMPTY = (
+    "Не получилось разобрать список 🤔\n"
+    "Пришлите позиции текстом, каждую с новой строки."
+)
+
+
+def list_parsed(items: list) -> str:
+    lines = [f"Я понял так — позиций: {len(items)}", ""]
+    lines += render_items(items)
+    lines += ["", "Всё верно?"]
+    return "\n".join(lines)
+
+
+def ask_missing_quantity(number: int, total: int, name: str) -> str:
+    return (
+        f"🔢 Остались количества. **Позиция {number} из {total}:**\n\n"
+        f"«{name}» — сколько нужно?"
+    )
+
 
 DEADLINE_CHOICES: dict[str, str] = {
     "urgent": "Срочно, сегодня-завтра",
@@ -105,6 +173,21 @@ def fmt_dt(value: datetime | str | None) -> str:
     return value.astimezone(DISPLAY_TZ).strftime("%d.%m.%Y %H:%M")
 
 
+def render_items(items: list) -> list[str]:
+    """Нумерованный список позиций для сообщений бота."""
+    lines: list[str] = []
+    for number, item in enumerate(items, start=1):
+        quantity = (item.get("quantity") or "").strip()
+        tail = f" — {quantity}" if quantity else ""
+        mark = "☑️ " if item.get("bought") else ""
+        lines.append(f"{number}. {mark}{item.get('name') or '—'}{tail}")
+        if item.get("link"):
+            lines.append(f"    🔗 {item['link']}")
+        elif item.get("photo_token") or item.get("photo_file"):
+            lines.append("    🖼 фото приложено")
+    return lines
+
+
 def render_request(
     data: Mapping[str, Any],
     *,
@@ -115,20 +198,36 @@ def render_request(
     lines: list[str] = [f"Заявка №{data['id']}" if data.get("id") else "Заявка"]
     if with_status and data.get("status"):
         lines.append(f"Статус: {label(data['status'])}")
-    lines += [
-        "",
-        f"👤 Кто заказывает: {data.get('requester') or '—'}",
-        f"📦 Что: {data.get('item') or '—'}",
-        f"🔢 Сколько: {data.get('quantity') or '—'}",
-        f"📅 К сроку: {data.get('deadline') or '—'}",
-        f"🎯 Зачем: {data.get('purpose') or '—'}",
-    ]
-    if data.get("example_url"):
-        lines.append(f"🔗 Пример: {data['example_url']}")
-    elif data.get("photo_token") or data.get("photo_file"):
-        lines.append("🖼 Пример: фото приложено")
+    lines += ["", f"👤 Кто заказывает: {data.get('requester') or '—'}"]
+
+    items = list(data.get("items") or [])
+    if len(items) > 1:
+        lines += [
+            f"📅 К сроку: {data.get('deadline') or '—'}",
+            f"🎯 Зачем: {data.get('purpose') or '—'}",
+            "",
+            f"📦 Позиции ({len(items)}):",
+        ]
+        lines += render_items(items)
     else:
-        lines.append("🔗 Пример: не приложен")
+        single = items[0] if items else {}
+        name = single.get("name") or data.get("item") or "—"
+        quantity = single.get("quantity") or data.get("quantity") or "—"
+        link = single.get("link") or data.get("example_url")
+        has_photo = single.get("photo_token") or single.get("photo_file") or data.get("photo_token")
+        lines += [
+            f"📦 Что: {name}",
+            f"🔢 Сколько: {quantity}",
+            f"📅 К сроку: {data.get('deadline') or '—'}",
+            f"🎯 Зачем: {data.get('purpose') or '—'}",
+        ]
+        if link:
+            lines.append(f"🔗 Пример: {link}")
+        elif has_photo:
+            lines.append("🖼 Пример: фото приложено")
+        else:
+            lines.append("🔗 Пример: не приложен")
+
     if with_author:
         author = data.get("author_name") or "—"
         if data.get("author_username"):
@@ -144,6 +243,13 @@ def admin_notification(data: Mapping[str, Any], panel_url: str = "") -> str:
     return text
 
 
+def title(data: Mapping[str, Any]) -> str:
+    """Заголовок заявки: первая позиция и сколько ещё."""
+    name = data.get("item") or "—"
+    extra = (data.get("items_count") or 0) - 1
+    return f"{name} и ещё {extra} поз." if extra > 0 else name
+
+
 def author_status_changed(
     data: Mapping[str, Any],
     previous_status: str,
@@ -153,7 +259,7 @@ def author_status_changed(
     lines = [
         f"🔄 Статус заявки №{data['id']} изменён",
         "",
-        f"📦 {data.get('item') or '—'}",
+        f"📦 {title(data)}",
         f"Было: {label(previous_status)}",
         f"Стало: {label(new_status)}",
     ]
@@ -191,12 +297,30 @@ def author_request_deleted(data: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def author_bulk_status(items: list, new_status: str, comment: str | None = None) -> str:
+    """Одно сообщение автору, когда статус поменяли сразу у нескольких его заявок."""
+    lines = [
+        f"🔄 Обновление по вашим заявкам ({len(items)})",
+        "",
+        f"Новый статус: {label(new_status)}",
+        "",
+    ]
+    lines += [f"№{data['id']} — {title(data)}" for data in items]
+    if comment:
+        lines += ["", f"💬 Комментарий: {comment}"]
+    if new_status == "clarify":
+        lines += ["", "Ответьте на это сообщение или свяжитесь с закупками, чтобы уточнить детали."]
+    return "\n".join(lines)
+
+
 def my_requests(rows: list[Mapping[str, Any]]) -> str:
     if not rows:
         return NO_REQUESTS
     lines = ["📋 Ваши заявки:", ""]
     for row in rows:
-        lines.append(f"№{row['id']} — {row['item']}")
+        extra = row.get("items_count") or 0
+        suffix = f" и ещё {extra - 1} поз." if extra > 1 else ""
+        lines.append(f"№{row['id']} — {row['item']}{suffix}")
         lines.append(f"   {label(row['status'])} · от {fmt_dt(row['created_at'])}")
         if row.get("admin_comment"):
             lines.append(f"   💬 {row['admin_comment']}")

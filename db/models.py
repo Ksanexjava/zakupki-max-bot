@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from core.statuses import DEFAULT_STATUS
@@ -30,6 +30,8 @@ class Request(Base):
 
     # то, что заполняет работник
     requester: Mapped[str] = mapped_column(String(300))
+    # item и quantity оставлены как заголовок заявки — это первая позиция.
+    # Сами позиции лежат в таблице items, их может быть несколько.
     item: Mapped[str] = mapped_column(String(600))
     quantity: Mapped[str] = mapped_column(String(200), default="")
     deadline: Mapped[str] = mapped_column(String(200), default="")
@@ -47,6 +49,13 @@ class Request(Base):
     # что добавили закупки
     admin_comment: Mapped[str | None] = mapped_column(Text, default=None)
 
+    items: Mapped[list["Item"]] = relationship(
+        back_populates="request",
+        cascade="all, delete-orphan",
+        order_by="Item.position",
+        lazy="selectin",
+    )
+
     attachments: Mapped[list["Attachment"]] = relationship(
         back_populates="request",
         cascade="all, delete-orphan",
@@ -62,6 +71,30 @@ class Request(Base):
     )
 
     __table_args__ = (Index("idx_requests_created", "created_at"),)
+
+
+class Item(Base):
+    """Позиция заявки: один товар со своим количеством, ссылкой и фото."""
+
+    __tablename__ = "items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_id: Mapped[int] = mapped_column(
+        ForeignKey("requests.id", ondelete="CASCADE"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, default=1)
+
+    name: Mapped[str] = mapped_column(String(600))
+    quantity: Mapped[str] = mapped_column(String(200), default="")
+    link: Mapped[str | None] = mapped_column(Text, default=None)
+    photo_token: Mapped[str | None] = mapped_column(Text, default=None)
+    photo_file: Mapped[str | None] = mapped_column(String(200), default=None)
+
+    #: отметка «куплено» — ставится в панели, статус заявки при этом не меняется
+    bought: Mapped[bool] = mapped_column(Boolean, default=False)
+    bought_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+    request: Mapped[Request] = relationship(back_populates="items")
 
 
 class StatusHistory(Base):

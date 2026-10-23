@@ -26,14 +26,15 @@ async def _fill_form(bot: FakeBot, context: MemoryContext, with_photo: bool = Fa
     """Проходит анкету целиком и возвращает номер созданной заявки."""
     await start.on_menu_new(callback_event(bot, "menu:new"), context)
     await form.step_requester_self(callback_event(bot, "form:self"), context)
+    await form.mode_one(callback_event(bot, "form:mode:one"), context)
     await form.step_item(message_event(bot, "Чайник Bosch, 1.7 л"), context)
     await form.step_quantity(message_event(bot, "1 шт"), context)
-    await form.step_deadline_button(callback_event(bot, "form:deadline:week"), context)
-    await form.step_purpose(message_event(bot, "На кухню, старый сломался"), context)
     if with_photo:
         await form.step_example_photo(message_event(bot, None, [PHOTO_ATTACHMENT]), context)
     else:
         await form.step_example_text(message_event(bot, "https://ozon.ru/product/1"), context)
+    await form.step_deadline_button(callback_event(bot, "form:deadline:week"), context)
+    await form.step_purpose(message_event(bot, "На кухню, старый сломался"), context)
     await form.form_submit(callback_event(bot, "form:submit"), context)
     rows = await repo.list_requests(author_user_id=USER["user_id"], limit=1)
     return rows[0].id
@@ -54,6 +55,7 @@ def test_form_creates_request_with_all_fields():
         assert request.deadline == "В течение недели"
         assert request.purpose == "На кухню, старый сломался"
         assert request.example_url == "https://ozon.ru/product/1"
+        assert [i.name for i in request.items] == ["Чайник Bosch, 1.7 л"]
         assert request.status == "new", "новая заявка должна быть «Не просмотрено»"
         assert request.author_user_id == USER["user_id"]
 
@@ -73,8 +75,8 @@ def test_photo_is_saved_and_form_state_cleared():
         request_id = await _fill_form(bot, context, with_photo=True)
 
         request = await repo.get_request(request_id)
-        assert request.photo_token == "photo-token"
-        assert request.photo_file and request.photo_file.endswith(".jpg")
+        assert request.items[0].photo_token == "photo-token"
+        assert request.items[0].photo_file and request.items[0].photo_file.endswith(".jpg")
         assert await context.get_state() is None, "после отправки анкета должна сбрасываться"
 
     run(scenario())

@@ -14,6 +14,14 @@ MENU_MY = "menu:my"
 
 FORM_SELF = "form:self"
 FORM_OTHER = "form:other"
+
+FORM_MODE_ONE = "form:mode:one"
+FORM_MODE_MANY = "form:mode:many"
+FORM_MODE_LIST = "form:mode:list"
+FORM_MORE = "form:more"
+FORM_DONE = "form:done"
+FORM_LIST_OK = "form:list:ok"
+FORM_LIST_REDO = "form:list:redo"
 FORM_SKIP = "form:skip"
 FORM_SUBMIT = "form:submit"
 FORM_RESTART = "form:restart"
@@ -45,6 +53,31 @@ def requester_kb(name: str) -> list:
     kb = InlineKeyboardBuilder()
     kb.row(CallbackButton(text=f"Это я: {name}"[:128], payload=FORM_SELF, intent=Intent.POSITIVE))
     kb.row(CallbackButton(text="Это не я", payload=FORM_OTHER))
+    kb.row(CallbackButton(text="❌ Отмена", payload=FORM_CANCEL, intent=Intent.NEGATIVE))
+    return _markup(kb)
+
+
+def mode_kb() -> list:
+    kb = InlineKeyboardBuilder()
+    kb.row(CallbackButton(text="Одна позиция", payload=FORM_MODE_ONE, intent=Intent.POSITIVE))
+    kb.row(CallbackButton(text="Несколько позиций", payload=FORM_MODE_MANY))
+    kb.row(CallbackButton(text="Вставлю списком", payload=FORM_MODE_LIST))
+    kb.row(CallbackButton(text="❌ Отмена", payload=FORM_CANCEL, intent=Intent.NEGATIVE))
+    return _markup(kb)
+
+
+def more_kb() -> list:
+    kb = InlineKeyboardBuilder()
+    kb.row(CallbackButton(text="➕ Ещё позиция", payload=FORM_MORE))
+    kb.row(CallbackButton(text="✓ Всё, дальше", payload=FORM_DONE, intent=Intent.POSITIVE))
+    kb.row(CallbackButton(text="❌ Отмена", payload=FORM_CANCEL, intent=Intent.NEGATIVE))
+    return _markup(kb)
+
+
+def list_confirm_kb() -> list:
+    kb = InlineKeyboardBuilder()
+    kb.row(CallbackButton(text="✓ Всё верно", payload=FORM_LIST_OK, intent=Intent.POSITIVE))
+    kb.row(CallbackButton(text="✏️ Прислать заново", payload=FORM_LIST_REDO))
     kb.row(CallbackButton(text="❌ Отмена", payload=FORM_CANCEL, intent=Intent.NEGATIVE))
     return _markup(kb)
 

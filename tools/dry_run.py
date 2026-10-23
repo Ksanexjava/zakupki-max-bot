@@ -43,11 +43,17 @@ async def main() -> None:
         ("пользователь открыл бота", lambda: start.on_bot_started(bot_started_event(bot), context)),
         ("нажал «Создать заявку»", lambda: start.on_menu_new(callback_event(bot, "menu:new"), context)),
         ("нажал «Это я»", lambda: form.step_requester_self(callback_event(bot, "form:self"), context)),
-        ("написал товар", lambda: form.step_item(message_event(bot, "Чайник электрический Bosch, 1.7 л"), context)),
-        ("написал количество", lambda: form.step_quantity(message_event(bot, "1 шт"), context)),
-        ("выбрал срок кнопкой", lambda: form.step_deadline_button(callback_event(bot, "form:deadline:week"), context)),
-        ("написал цель", lambda: form.step_purpose(message_event(bot, "На кухню в бухгалтерии, старый сломался"), context)),
-        ("прислал фото товара", lambda: form.step_example_photo(message_event(bot, None, [PHOTO_ATTACHMENT]), context)),
+        ("выбрал «Вставлю списком»", lambda: form.mode_list(callback_event(bot, "form:mode:list"), context)),
+        ("прислал список позиций", lambda: form.step_bulk_list(message_event(
+            bot,
+            "Гель для стирки Ariel — 10 шт https://ozon.ru/t/gel\n"
+            "Пемолюкс Лимон порошок 480г https://ozon.ru/t/pem\n"
+            "Перчатки х/б с ПВХ-точкой, размер 10 — 20 пар",
+        ), context)),
+        ("подтвердил разбор", lambda: form.bulk_ok(callback_event(bot, "form:list:ok"), context)),
+        ("дописал недостающее количество", lambda: form.step_fix_quantity(message_event(bot, "10 шт"), context)),
+        ("выбрал срок кнопкой", lambda: form.step_deadline_button(callback_event(bot, "form:deadline:urgent"), context)),
+        ("написал цель", lambda: form.step_purpose(message_event(bot, "Расходники для уборки в отделениях"), context)),
         ("подтвердил отправку", lambda: form.form_submit(callback_event(bot, "form:submit"), context)),
         ("шеф нажал «В работе»", lambda: admin.on_status_button(callback_event(bot, "adm:1:in_progress", ADMIN))),
         ("посмотрел свои заявки", lambda: start.on_my(message_event(bot, "/my"))),
@@ -61,9 +67,10 @@ async def main() -> None:
     rows = await repo.list_requests()
     print(f"✅ Заявок в базе: {len(rows)}")
     for row in rows:
-        print(f"   №{row.id} [{label(row.status)}] {row.item} — {row.quantity}, {row.deadline}")
-        print(f"       цель: {row.purpose}")
-        print(f"       фото: {row.photo_file} | ссылка: {row.example_url}")
+        print(f"   №{row.id} [{label(row.status)}] {row.deadline} · цель: {row.purpose}")
+        for item in row.items:
+            link = f" | {item.link}" if item.link else ""
+            print(f"       {item.position}. {item.name} — {item.quantity}{link}")
     print("\n📜 История заявки №1:")
     for item in await repo.history(1):
         print(f"   {item.actor}: {item.from_status} → {item.to_status} {item.comment or ''}")

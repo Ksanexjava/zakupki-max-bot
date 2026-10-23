@@ -15,7 +15,12 @@ from aiohttp import web
 from bot import texts
 from config import BASE_DIR, settings
 from bot.media import remove_photo
-from core.notifications import notify_author, notify_author_comment, notify_author_deleted
+from core.notifications import (
+    notify_author,
+    notify_author_comment,
+    notify_author_deleted,
+    notify_authors_bulk,
+)
 from core.statuses import STATUSES
 from db import repo
 
@@ -285,6 +290,81 @@ async def handle_delete(request: web.Request) -> web.StreamResponse:
     return web.json_response({"ok": True, "author_notified": notified, "notify_error": error})
 
 
+async def handle_bulk_status(request: web.Request) -> web.StreamResponse:
+    """Смена статуса сразу у нескольких заявок."""
+    actor = current_user(request) or "panel"
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return web.json_response({"error": "bad_request"}, status=400)
+
+    status = str(payload.get("status", ""))
+    comment = (str(payload.get("comment", "")) or "").strip() or None
+    ids = [int(value) for value in payload.get("ids", []) if str(value).isdigit()]
+    if status not in STATUSES:
+        return web.json_response({"error": "unknown_status"}, status=400)
+    if not ids:
+        return web.json_response({"error": "no_ids"}, status=400)
+
+    changes = await repo.bulk_set_status(ids, status, actor, comment)
+    log.info("Массовая смена статуса на %s: заявок %s, автор действия %s", status, len(changes), actor)
+
+    notified, errors = await notify_authors_bulk(request.app.get(BOT_KEY), changes, comment)
+    return web.json_response(
+        {
+            "ok": True,
+            "changed": len(changes),
+            "requested": len(ids),
+            "authors_notified": notified,
+            # одинаковые причины схлопываем: иначе в тосте дубли
+            "notify_error": "; ".join(list(dict.fromkeys(errors))[:3]) or None,
+        }
+    )
+
+
+async def handle_bulk_delete(request: web.Request) -> web.StreamResponse:
+    """Удаление нескольких заявок разом."""
+    actor = current_user(request) or "panel"
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return web.json_response({"error": "bad_request"}, status=400)
+    ids = [int(value) for value in payload.get("ids", []) if str(value).isdigit()]
+    if not ids:
+        return web.json_response({"error": "no_ids"}, status=400)
+
+    deleted = await repo.bulk_delete(ids)
+    for data in deleted:
+        for name in data.get("files", []):
+            remove_photo(name)
+    log.info("Удалено заявок: %s (пользователь %s)", len(deleted), actor)
+
+    notified = 0
+    bot = request.app.get(BOT_KEY)
+    if bot is not None:
+        for data in deleted:
+            ok, _ = await notify_author_deleted(bot, data)
+            notified += int(ok)
+    return web.json_response({"ok": True, "deleted": len(deleted), "authors_notified": notified})
+
+
+async def handle_item_bought(request: web.Request) -> web.StreamResponse:
+    """Отметка «куплено» у позиции. Статус заявки не меняется."""
+    item_id = int(request.match_info["item_id"])
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        payload = {}
+    bought = bool(payload.get("bought", True))
+    item = await repo.set_item_bought(item_id, bought)
+    if item is None:
+        return web.json_response({"error": "not_found"}, status=404)
+    updated = await repo.get_request(item["request_id"])
+    return web.json_response(
+        {"ok": True, "item": item, "request": _decorate(repo.to_dict(updated)) if updated else None}
+    )
+
+
 async def handle_upload(request: web.Request) -> web.StreamResponse:
     """Приём скриншота к заявке: multipart-поле `file`."""
     actor = current_user(request) or "panel"
@@ -384,6 +464,9 @@ def create_app(bot: Any = None) -> web.Application:
             web.post(r"/api/requests/{request_id:\d+}/status", handle_set_status),
             web.post(r"/api/requests/{request_id:\d+}/comment", handle_comment),
             web.delete(r"/api/requests/{request_id:\d+}", handle_delete),
+            web.post("/api/requests/bulk-status", handle_bulk_status),
+            web.post("/api/requests/bulk-delete", handle_bulk_delete),
+            web.post(r"/api/items/{item_id:\d+}/bought", handle_item_bought),
             web.post(r"/api/requests/{request_id:\d+}/attachments", handle_upload),
             web.delete(r"/api/attachments/{attachment_id:\d+}", handle_delete_attachment),
             web.get("/media/{filename}", handle_media),

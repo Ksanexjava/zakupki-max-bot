@@ -118,3 +118,41 @@ async def notify_author_deleted(
 ) -> tuple[bool, str | None]:
     """Сообщает автору, что заявку удалили."""
     return await _send_to_author(bot, request, texts.author_request_deleted(request))
+
+
+async def notify_authors_bulk(
+    bot: Any,
+    changes: list[tuple[Mapping[str, Any], str]],
+    comment: str | None = None,
+) -> tuple[int, list[str]]:
+    """Уведомляет авторов после массовой смены статуса.
+
+    Если у одного человека изменилось несколько заявок, он получает одно
+    сообщение со списком, а не десяток отдельных.
+    """
+    if not settings.notify_author or not changes:
+        return 0, []
+
+    by_author: dict[int, list[tuple[Mapping[str, Any], str]]] = {}
+    for data, previous in changes:
+        author_id = data.get("author_user_id")
+        if author_id:
+            by_author.setdefault(int(author_id), []).append((data, previous))
+
+    delivered = 0
+    errors: list[str] = []
+    for items in by_author.values():
+        if len(items) == 1:
+            data, previous = items[0]
+            ok, reason = await notify_author(bot, data, previous, comment)
+        else:
+            first = items[0][0]
+            text = texts.author_bulk_status(
+                [data for data, _ in items], first.get("status", ""), comment
+            )
+            ok, reason = await _send_to_author(bot, first, text)
+        if ok:
+            delivered += 1
+        elif reason:
+            errors.append(reason)
+    return delivered, errors
