@@ -31,13 +31,19 @@ def _bool(name: str, default: bool = False) -> bool:
     return os.environ.get(name, str(default)).strip().lower() in {"1", "true", "yes", "on", "да"}
 
 
-def _parse_users(raw: str) -> dict[str, str]:
-    """PANEL_USERS="mike:pass1,ivan:pass2" -> {"mike": "pass1", ...}"""
-    users: dict[str, str] = {}
+def _parse_users(raw: str) -> dict[str, dict[str, str]]:
+    """PANEL_USERS="mike:pass,sklad:pass:stock" -> {логин: {пароль, роль}}.
+
+    Третья часть — роль: admin (по умолчанию) или stock.
+    Склад видит только свою панель и не может менять статусы заявок.
+    """
+    users: dict[str, dict[str, str]] = {}
     for chunk in raw.split(","):
-        login, _, password = chunk.strip().partition(":")
-        if login.strip() and password.strip():
-            users[login.strip()] = password.strip()
+        parts = [part.strip() for part in chunk.strip().split(":")]
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            continue
+        role = parts[2] if len(parts) > 2 and parts[2] in {"admin", "stock"} else "admin"
+        users[parts[0]] = {"password": parts[1], "role": role}
     return users
 
 
@@ -72,7 +78,7 @@ class Settings:
     panel_enabled: bool
     panel_host: str
     panel_port: int
-    panel_users: dict[str, str]
+    panel_users: dict[str, dict[str, str]]
     panel_public_url: str
     secret_key: str
     secret_key_generated: bool
@@ -80,6 +86,9 @@ class Settings:
     secure_cookie: bool
     # поведение
     notify_author: bool
+    #: если задан — QR на наклейке содержит ссылку вида <база>/ZK-12-03,
+    #: иначе просто код. Ссылку имеет смысл включать, когда появится домен.
+    stock_qr_base: str
     tz_offset: float
     log_level: str
     seed_demo: bool = field(default=False)
@@ -106,6 +115,7 @@ settings = Settings(
     session_days=int(os.environ.get("PANEL_SESSION_DAYS", "30")),
     secure_cookie=_bool("PANEL_SECURE_COOKIE", False),
     notify_author=_bool("NOTIFY_AUTHOR", True),
+    stock_qr_base=os.environ.get("STOCK_QR_BASE", "").strip().rstrip("/"),
     tz_offset=_float("DISPLAY_TZ_OFFSET", 3.0),
     log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
     seed_demo=_bool("SEED_DEMO", False),

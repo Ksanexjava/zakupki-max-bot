@@ -22,6 +22,8 @@ from core.notifications import (
     notify_authors_bulk,
 )
 from core.statuses import STATUSES
+from panel import labels as labels_page
+from core.notifications import notify_author_arrived  # noqa: E402
 from db import repo
 
 log = logging.getLogger("panel")
@@ -79,6 +81,25 @@ def current_user(request: web.Request) -> str | None:
     return login if login and login in settings.panel_users else None
 
 
+def current_role(request: web.Request) -> str | None:
+    """admin — закупки, stock — склад."""
+    login = current_user(request)
+    if login is None:
+        return None
+    return settings.panel_users.get(login, {}).get("role", "admin")
+
+
+#: что разрешено складскому логину; всё остальное под /api/ — только закупкам
+STOCK_ALLOWED_PREFIXES = (
+    "/labels",
+    "/api/meta",
+    "/api/logout",
+    "/api/stock/",
+    "/api/employees",
+    "/media/",
+)
+
+
 @web.middleware
 async def no_cache_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
     """Панель обновляется вместе с ботом — браузер не должен держать старый app.js."""
@@ -91,16 +112,31 @@ async def no_cache_middleware(request: web.Request, handler: Any) -> web.StreamR
 @web.middleware
 async def auth_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
     open_paths = {"/api/login", "/api/meta", "/healthz"}
-    protected = request.path.startswith(("/api/", "/media/")) and request.path not in open_paths
+    # /labels отдаёт данные заявок, поэтому тоже под авторизацией
+    protected = (
+        request.path.startswith(("/api/", "/media/", "/labels")) and request.path not in open_paths
+    )
     if protected and current_user(request) is None:
         return web.json_response({"error": "unauthorized"}, status=401)
+
+    # кладовщик не должен менять статусы, удалять заявки и трогать вложения
+    if protected and current_role(request) == "stock":
+        if not request.path.startswith(STOCK_ALLOWED_PREFIXES):
+            return web.json_response({"error": "forbidden", "detail": "только для закупок"}, status=403)
     return await handler(request)
 
 
 # ---------------------------------------------------------------- хендлеры
 
 async def handle_index(request: web.Request) -> web.StreamResponse:
+    # кладовщику сразу открываем его экран
+    if current_role(request) == "stock":
+        raise web.HTTPFound("/sklad")
     return web.FileResponse(STATIC_DIR / "index.html")
+
+
+async def handle_stock_page(request: web.Request) -> web.StreamResponse:
+    return web.FileResponse(STATIC_DIR / "stock.html")
 
 
 async def handle_health(request: web.Request) -> web.StreamResponse:
@@ -115,6 +151,7 @@ async def handle_meta(request: web.Request) -> web.StreamResponse:
                 for key, meta in STATUSES.items()
             ],
             "user": current_user(request),
+            "role": current_role(request),
         }
     )
 
@@ -135,14 +172,17 @@ async def handle_login(request: web.Request) -> web.StreamResponse:
 
     login = str(payload.get("login", "")).strip()
     password = str(payload.get("password", ""))
-    expected = settings.panel_users.get(login)
+    account = settings.panel_users.get(login) or {}
+    expected = account.get("password", "")
     # сравниваем байты: compare_digest не принимает строки с не-ASCII символами
     if not expected or not secrets.compare_digest(password.encode(), expected.encode()):
         failures[ip] = [*recent, now]
         log.warning("Неудачный вход в панель: login=%r ip=%s", login, ip)
         return web.json_response({"error": "invalid_credentials"}, status=401)
 
-    response = web.json_response({"ok": True, "user": login})
+    response = web.json_response(
+        {"ok": True, "user": login, "role": account.get("role", "admin")}
+    )
     response.set_cookie(
         COOKIE_NAME,
         make_token(login),
@@ -236,6 +276,10 @@ async def handle_set_status(request: web.Request) -> web.StreamResponse:
         return web.json_response({"error": "not_found"}, status=404)
 
     updated, previous = result
+    if status == "ordered":
+        # заявка уехала на склад: отмечаем все позиции купленными
+        await repo.mark_items_bought(request_id)
+        updated = await repo.get_request(request_id) or updated
     data = repo.to_dict(updated)
     notified, error = await notify_author(request.app.get(BOT_KEY), data, previous, comment)
     return web.json_response(
@@ -307,6 +351,9 @@ async def handle_bulk_status(request: web.Request) -> web.StreamResponse:
         return web.json_response({"error": "no_ids"}, status=400)
 
     changes = await repo.bulk_set_status(ids, status, actor, comment)
+    if status == "ordered":
+        for data, _ in changes:
+            await repo.mark_items_bought(data["id"])
     log.info("Массовая смена статуса на %s: заявок %s, автор действия %s", status, len(changes), actor)
 
     notified, errors = await notify_authors_bulk(request.app.get(BOT_KEY), changes, comment)
@@ -440,6 +487,138 @@ async def handle_delete_attachment(request: web.Request) -> web.StreamResponse:
     return web.json_response({"ok": True})
 
 
+# ------------------------------------------------------------------ склад
+
+async def handle_stock_queue(request: web.Request) -> web.StreamResponse:
+    """Очереди склада: что ждём и что лежит невыданным."""
+    kind = request.query.get("kind", "pending")
+    kind = kind if kind in {"pending", "on_hand"} else "pending"
+    rows = await repo.stock_queue(kind)
+    for row in rows:
+        row["created_at"] = texts.fmt_dt(row.get("created_at"))
+    return web.json_response({"kind": kind, "items": rows})
+
+
+async def handle_stock_history(request: web.Request) -> web.StreamResponse:
+    limit = min(int(request.query.get("limit", 60)), 300)
+    rows = await repo.movements_history(limit)
+    for row in rows:
+        row["created_at"] = texts.fmt_dt(row.get("created_at"))
+    return web.json_response({"movements": rows})
+
+
+async def handle_stock_find(request: web.Request) -> web.StreamResponse:
+    """Поиск позиции по складскому коду — для сканера и ручного ввода."""
+    found = await repo.find_item_by_code(request.query.get("code", ""))
+    if found is None:
+        return web.json_response({"error": "not_found"}, status=404)
+    found["request"] = _decorate(found["request"]) if found.get("request") else None
+    return web.json_response(found)
+
+
+async def handle_stock_movement(request: web.Request) -> web.StreamResponse:
+    """Приём на склад или выдача со склада."""
+    actor_login = current_user(request) or "panel"
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return web.json_response({"error": "bad_request"}, status=400)
+
+    kind = str(payload.get("kind", ""))
+    if kind not in {"in", "out"}:
+        return web.json_response({"error": "bad_kind"}, status=400)
+    try:
+        item_id = int(payload.get("item_id"))
+        quantity = float(payload.get("quantity") or 0)
+    except (TypeError, ValueError):
+        return web.json_response({"error": "bad_request"}, status=400)
+    if quantity < 0:
+        return web.json_response({"error": "bad_quantity"}, status=400)
+
+    actor_name = str(payload.get("actor_name", "")).strip() or actor_login
+    result = await repo.record_movement(
+        item_id=item_id,
+        kind=kind,
+        quantity=quantity,
+        actor_name=actor_name,
+        actor_employee_id=payload.get("actor_employee_id") or None,
+        recipient_name=str(payload.get("recipient_name", "")).strip(),
+        recipient_employee_id=payload.get("recipient_employee_id") or None,
+        note=str(payload.get("note", "")).strip(),
+        close=bool(payload.get("close")),
+    )
+    if result is None:
+        return web.json_response({"error": "not_found"}, status=404)
+
+    log.info(
+        "Склад: %s %s по позиции %s (%s)",
+        "приход" if kind == "in" else "выдача", quantity, item_id, actor_name,
+    )
+
+    bot = request.app.get(BOT_KEY)
+    notified = None
+    if result["request_arrived"] and bot is not None and result["request"]:
+        ok, _ = await notify_author_arrived(bot, result["request"])
+        notified = ok
+        if ok:
+            await repo.mark_arrived_notified(result["request"]["id"])
+    if result["request_completed"] and bot is not None and result["request"]:
+        await notify_author(bot, result["request"], "ordered")
+
+    result["request"] = _decorate(result["request"]) if result.get("request") else None
+    result["author_notified"] = notified
+    return web.json_response({"ok": True, **result})
+
+
+async def handle_employees(request: web.Request) -> web.StreamResponse:
+    return web.json_response({"employees": await repo.list_employees()})
+
+
+async def handle_employee_add(request: web.Request) -> web.StreamResponse:
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return web.json_response({"error": "bad_request"}, status=400)
+    full_name = str(payload.get("full_name", "")).strip()
+    if not full_name:
+        return web.json_response({"error": "empty_name"}, status=400)
+    employee = await repo.add_employee(
+        full_name,
+        str(payload.get("department", "")).strip(),
+        bool(payload.get("is_stock")),
+    )
+    return web.json_response({"ok": True, "employee": employee})
+
+
+async def handle_labels(request: web.Request) -> web.StreamResponse:
+    """Лист наклеек: /labels?request=12 или /labels?items=5,6,7."""
+    item_ids: list[int] = []
+    raw_items = request.query.get("items", "")
+    for chunk in raw_items.replace(";", ",").split(","):
+        if chunk.strip().isdigit():
+            item_ids.append(int(chunk.strip()))
+
+    rows: list[dict] = []
+    raw_request = request.query.get("request", "")
+    if raw_request.isdigit():
+        found = await repo.get_request(int(raw_request))
+        if found is not None:
+            rows = [
+                {**repo.item_to_dict(item), "request_id": found.id} for item in found.items
+            ]
+    if item_ids:
+        rows = [row for row in rows if row["id"] in item_ids] if rows else []
+        if not rows:
+            for item_id in item_ids:
+                found = await repo.find_item_by_id(item_id)
+                if found is not None:
+                    rows.append(found)
+    if not rows:
+        return web.json_response({"error": "nothing_to_print"}, status=404)
+
+    return web.Response(text=labels_page.render(rows), content_type="text/html")
+
+
 async def handle_media(request: web.Request) -> web.StreamResponse:
     name = Path(request.match_info["filename"]).name  # защита от ../
     path = settings.media_dir / name
@@ -455,6 +634,7 @@ def create_app(bot: Any = None) -> web.Application:
     app.add_routes(
         [
             web.get("/", handle_index),
+            web.get("/sklad", handle_stock_page),
             web.get("/healthz", handle_health),
             web.get("/api/meta", handle_meta),
             web.post("/api/login", handle_login),
@@ -467,6 +647,13 @@ def create_app(bot: Any = None) -> web.Application:
             web.post("/api/requests/bulk-status", handle_bulk_status),
             web.post("/api/requests/bulk-delete", handle_bulk_delete),
             web.post(r"/api/items/{item_id:\d+}/bought", handle_item_bought),
+            web.get("/labels", handle_labels),
+            web.get("/api/stock/queue", handle_stock_queue),
+            web.get("/api/stock/history", handle_stock_history),
+            web.get("/api/stock/find", handle_stock_find),
+            web.post("/api/stock/movement", handle_stock_movement),
+            web.get("/api/employees", handle_employees),
+            web.post("/api/employees", handle_employee_add),
             web.post(r"/api/requests/{request_id:\d+}/attachments", handle_upload),
             web.delete(r"/api/attachments/{attachment_id:\d+}", handle_delete_attachment),
             web.get("/media/{filename}", handle_media),

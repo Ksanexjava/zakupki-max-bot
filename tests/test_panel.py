@@ -21,7 +21,7 @@ def run(coro):
 
 async def _client(bot=None) -> TestClient:
     await init_db()
-    settings.panel_users[LOGIN] = PASSWORD
+    settings.panel_users[LOGIN] = {"password": PASSWORD, "role": "admin"}
     client = TestClient(TestServer(create_app(bot=bot)))
     await client.start_server()
     return client

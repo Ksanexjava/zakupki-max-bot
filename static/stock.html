@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Склад</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/stock.css">
+  <script>
+    try {
+      var saved = localStorage.getItem('pb_theme');
+      if (saved === 'light' || saved === 'dark') document.documentElement.dataset.theme = saved;
+    } catch (e) {}
+  </script>
+</head>
+<body>
+
+<section id="login-screen" class="login-screen" hidden>
+  <form class="login-card" id="login-form">
+    <h1>Склад</h1>
+    <p class="muted">Введите логин и пароль склада.</p>
+    <label>Логин <input type="text" id="login" autocomplete="username" required></label>
+    <label>Пароль <input type="password" id="password" autocomplete="current-password" required></label>
+    <button type="submit" class="btn btn-primary btn-block">Войти</button>
+    <p class="form-error" id="login-error" hidden></p>
+  </form>
+</section>
+
+<div id="app" class="app" hidden>
+  <header class="topbar">
+    <h1>Склад</h1>
+    <div class="topbar-right">
+      <label class="who">
+        Работает:
+        <select id="actor"></select>
+      </label>
+      <button class="btn btn-quiet" id="add-employee">+ сотрудник</button>
+      <input type="search" id="scan" class="search scan" placeholder="Код позиции: ZK-12-03" autocomplete="off">
+      <button class="btn btn-quiet" id="refresh-btn">Обновить</button>
+      <span class="user" id="user-chip"></span>
+      <button class="btn btn-quiet" id="logout-btn">Выйти</button>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="pending">Ждём<span class="count" id="count-pending">0</span></button>
+    <button class="tab" data-tab="on_hand">На складе<span class="count" id="count-onhand">0</span></button>
+    <button class="tab" data-tab="history">История</button>
+  </nav>
+
+  <main class="content">
+    <div id="list" class="stock-list"></div>
+    <p class="empty" id="empty" hidden>Здесь пока пусто.</p>
+  </main>
+</div>
+
+<div class="overlay" id="overlay" hidden>
+  <div class="modal modal-narrow" role="dialog" aria-modal="true">
+    <header class="modal-head">
+      <h2 id="modal-title">Позиция</h2>
+      <button class="icon-btn" id="modal-close" title="Закрыть (Esc)">&times;</button>
+    </header>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="/static/stock.js"></script>
+</body>
+</html>

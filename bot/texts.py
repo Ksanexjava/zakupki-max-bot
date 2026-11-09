@@ -297,6 +297,22 @@ def author_request_deleted(data: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def author_arrived(data: Mapping[str, Any]) -> str:
+    """Заказ целиком приехал на склад — можно забирать."""
+    lines = [
+        f"📦 Заказ по заявке №{data['id']} на складе",
+        "",
+    ]
+    items = list(data.get("items") or [])
+    if len(items) > 1:
+        lines.append(f"Позиции ({len(items)}):")
+        lines += render_items(items)
+    else:
+        lines.append(title(data))
+    lines += ["", "Можно забрать у кладовщика."]
+    return "\n".join(lines)
+
+
 def author_bulk_status(items: list, new_status: str, comment: str | None = None) -> str:
     """Одно сообщение автору, когда статус поменяли сразу у нескольких его заявок."""
     lines = [

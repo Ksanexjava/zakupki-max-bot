@@ -140,10 +140,13 @@ chmod 600 .env
 ```
 MAX_BOT_TOKEN=токен от @MasterBot
 ADMIN_CODE=секретное слово для команды /admin
-PANEL_USERS="mike:пароль"
+PANEL_USERS="mike:пароль,sklad:пароль-склада:stock"
 SECRET_KEY=то, что выдала команда выше
 DISPLAY_TZ_OFFSET=3
 ```
+
+Третья часть в `PANEL_USERS` — роль: `admin` (по умолчанию, закупки) или
+`stock` (склад, экран `/sklad`).
 
 Если уже знаете домен, сразу добавьте:
 

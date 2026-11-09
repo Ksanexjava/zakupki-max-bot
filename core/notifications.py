@@ -156,3 +156,8 @@ async def notify_authors_bulk(
         elif reason:
             errors.append(reason)
     return delivered, errors
+
+
+async def notify_author_arrived(bot: Any, request: Mapping[str, Any]) -> tuple[bool, str | None]:
+    """Сообщает автору, что заказ приехал на склад."""
+    return await _send_to_author(bot, request, texts.author_arrived(request))

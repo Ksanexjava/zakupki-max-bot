@@ -2,7 +2,17 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from core.statuses import DEFAULT_STATUS
@@ -49,6 +59,9 @@ class Request(Base):
     # что добавили закупки
     admin_comment: Mapped[str | None] = mapped_column(Text, default=None)
 
+    #: автору уже написали, что заказ приехал на склад
+    arrived_notified: Mapped[bool] = mapped_column(Boolean, default=False)
+
     items: Mapped[list["Item"]] = relationship(
         back_populates="request",
         cascade="all, delete-orphan",
@@ -90,9 +103,32 @@ class Item(Base):
     photo_token: Mapped[str | None] = mapped_column(Text, default=None)
     photo_file: Mapped[str | None] = mapped_column(String(200), default=None)
 
+    #: количество числом — нужно складу, чтобы считать «принято 7 из 10»
+    qty_number: Mapped[float | None] = mapped_column(Float, default=None)
+    qty_unit: Mapped[str] = mapped_column(String(30), default="")
+
+    #: товар из справочника; подбирается по названию при первой приёмке
+    product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", ondelete="SET NULL"), default=None, index=True
+    )
+    #: складской номер вида ZK-12-03 — он же на наклейке с QR
+    stock_code: Mapped[str | None] = mapped_column(String(40), default=None, index=True)
+
     #: отметка «куплено» — ставится в панели, статус заявки при этом не меняется
     bought: Mapped[bool] = mapped_column(Boolean, default=False)
     bought_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+    #: склад закрыл позицию по приходу / по выдаче
+    received_done: Mapped[bool] = mapped_column(Boolean, default=False)
+    issued_done: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    product: Mapped["Product | None"] = relationship(lazy="joined")
+    movements: Mapped[list["Movement"]] = relationship(
+        back_populates="item",
+        cascade="all, delete-orphan",
+        order_by="Movement.id",
+        lazy="selectin",
+    )
 
     request: Mapped[Request] = relationship(back_populates="items")
 
@@ -130,6 +166,73 @@ class Attachment(Base):
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     request: Mapped[Request] = relationship(back_populates="attachments")
+
+
+class Employee(Base):
+    """Сотрудник: кто принимает на склад и кому выдают товар."""
+
+    __tablename__ = "employees"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    full_name: Mapped[str] = mapped_column(String(300))
+    department: Mapped[str] = mapped_column(String(200), default="")
+    #: если человек пользуется ботом — его id в MAX (пригодится мини-приложению)
+    max_user_id: Mapped[int | None] = mapped_column(BigInteger, default=None, index=True)
+    #: работает на складе — показывать первым в списке «кто принимает»
+    is_stock: Mapped[bool] = mapped_column(Boolean, default=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Product(Base):
+    """Номенклатура склада.
+
+    Собирается сама: при первой приёмке позиции ищется товар с таким же
+    названием, и либо позиция привязывается к нему, либо заводится новый.
+    """
+
+    __tablename__ = "products"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(600))
+    #: нормализованное название — по нему ищем совпадения
+    norm_name: Mapped[str] = mapped_column(String(600), unique=True, index=True)
+    unit: Mapped[str] = mapped_column(String(30), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Movement(Base):
+    """Движение товара: приход на склад или выдача со склада."""
+
+    __tablename__ = "movements"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[int] = mapped_column(
+        ForeignKey("items.id", ondelete="CASCADE"), index=True
+    )
+    product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", ondelete="SET NULL"), default=None, index=True
+    )
+    #: in — приняли на склад, out — выдали со склада
+    kind: Mapped[str] = mapped_column(String(8))
+    quantity: Mapped[float] = mapped_column(Float, default=0)
+
+    #: кто сделал (сотрудник склада) и под каким логином
+    actor_employee_id: Mapped[int | None] = mapped_column(
+        ForeignKey("employees.id", ondelete="SET NULL"), default=None
+    )
+    actor_name: Mapped[str] = mapped_column(String(300), default="")
+
+    #: кому выдали — заполняется только у расхода
+    recipient_employee_id: Mapped[int | None] = mapped_column(
+        ForeignKey("employees.id", ondelete="SET NULL"), default=None
+    )
+    recipient_name: Mapped[str] = mapped_column(String(300), default="")
+
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+    item: Mapped[Item] = relationship(back_populates="movements")
 
 
 class Admin(Base):

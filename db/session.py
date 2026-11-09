@@ -7,7 +7,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from config import settings
-from db.models import Base, Item, Request
+from db import migrate
+from db.models import Base, Employee, Item, Request
 
 log = logging.getLogger(__name__)
 
@@ -36,8 +37,12 @@ async def init_db() -> None:
     """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await migrate.run(conn)
     settings.media_dir.mkdir(parents=True, exist_ok=True)
     await migrate_items()
+    async with Session() as session:
+        await migrate.backfill(session)
+    await seed_employees()
     log.info("База готова: %s", settings.database_url)
 
 
@@ -69,3 +74,26 @@ async def migrate_items() -> None:
             )
         await session.commit()
         log.info("Перенесено заявок в формат позиций: %s", len(without_items))
+
+
+async def seed_employees() -> None:
+    """Заводит сотрудников по авторам заявок — чтобы справочник не был пустым."""
+    async with Session() as session:
+        known = {
+            name for (name,) in (await session.execute(select(Employee.full_name))).all()
+        }
+        rows = (
+            await session.execute(
+                select(Request.author_name, Request.author_user_id).distinct()
+            )
+        ).all()
+        added = 0
+        for full_name, max_user_id in rows:
+            if not full_name or full_name in known:
+                continue
+            session.add(Employee(full_name=full_name, max_user_id=max_user_id))
+            known.add(full_name)
+            added += 1
+        if added:
+            await session.commit()
+            log.info("Добавлено сотрудников из заявок: %s", added)

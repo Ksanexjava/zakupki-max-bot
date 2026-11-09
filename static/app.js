@@ -397,6 +397,8 @@ function modalHtml(row, history, attachments) {
 
     <div class="modal-footer">
       <div class="row-actions">
+        <a class="btn" id="labels-btn" href="/labels?request=${row.id}" target="_blank"
+           rel="noopener">Наклейки на товар</a>
         <button class="btn btn-danger" id="delete-btn">Удалить заявку</button>
       </div>
       <div id="delete-confirm" hidden>
