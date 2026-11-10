@@ -447,15 +447,13 @@ function renderNav() {
   const active = el('stock-nav').querySelector('.active');
   if (active) active.scrollIntoView({ inline: 'center', block: 'nearest' });
 
-  const current = state.view === 'w' ? state.arg : 'snab';
-  el('warehouse').innerHTML = WAREHOUSES.map((w) =>
-    `<option value="${w.slug}" ${w.slug === current ? 'selected' : ''}>${esc(w.name)}${w.ready ? '' : ' — скоро'}</option>`
-  ).join('');
+  // название склада в шапке — ссылка ко всем его разделам; сменить склад можно на главной портала
+  const current = WAREHOUSES.find((w) => w.slug === (state.view === 'w' ? state.arg : 'snab')) || WAREHOUSES[0];
+  const link = el('warehouse');
+  link.textContent = current.name;
+  link.href = current.ready ? '#/home' : `#/w/${current.slug}`;
+  link.classList.toggle('active', state.view === 'home' || state.view === 'w');
 }
-
-el('warehouse').addEventListener('change', (event) => {
-  location.hash = event.target.value === 'snab' ? '#/home' : `#/w/${event.target.value}`;
-});
 
 async function route() {
   Scanner.stop();
@@ -592,7 +590,7 @@ async function viewReceiving(root) {
       ${data.items.length > 1 ? '<label class="pick-all"><input type="checkbox" class="check" id="r-all"> выбрать все</label>' : ''}</div>
     <div class="bulk-bar" id="r-bar" hidden>
       <span>Выбрано: <b id="r-count">0</b></span>
-      <button class="btn btn-primary" id="r-receive">Принять выбранные полностью</button>
+      <button class="btn btn-primary" id="r-receive">Принять выбранные</button>
     </div>
     <div class="stock-list">${data.items.map((row) => requestCard(row, 'in')).join('')}</div>
     ${data.items.length ? '' : '<p class="empty">Ничего не ждём — все заказы приняты.</p>'}
@@ -642,7 +640,7 @@ async function viewReceiving(root) {
     root.querySelectorAll('[data-pick]').forEach((c) => { c.checked = all.checked; });
     syncBar();
   });
-  el('r-receive').addEventListener('click', () => receiveMany(picked()));
+  el('r-receive').addEventListener('click', () => receiveManyForm(picked()));
   root.querySelectorAll('[data-part]').forEach((b) => b.addEventListener('click', () => receiveForm(rows[b.dataset.part])));
   root.querySelectorAll('[data-place]').forEach((b) => b.addEventListener('click', () => {
     placeForm(bulk.find((i) => String(i.product_id) === b.dataset.place));
@@ -693,28 +691,64 @@ async function afterReceive(result) {
     placeInstancesForm(zone.instances.filter((i) => codes.includes(i.code)), codes);
     return;
   }
-  if (!hasPlaces()) return;
   const item = bulkItems(zone).find((i) => i.product_id === (result.item && result.item.product_id));
   const code = result.item && result.item.stock_code;
-  if (item) placeForm(item, null, null, 'Принято — куда положить?', code ? [code] : []);
+  if (item && hasPlaces()) {
+    placeForm(item, null, null, 'Принято — куда положить?', code ? [code] : []);
+  } else if (code) {
+    openModal('Принято', `
+      <p class="muted" style="margin:0 0 14px">Товар лежит в зоне приёмки.</p>
+      <a class="btn btn-primary btn-lg btn-block" href="${labelsUrl([code])}" target="_blank" rel="noopener">Напечатать наклейку</a>`);
+  }
 }
 
-/** Приёмка нескольких позиций: каждая принимается полностью. */
-async function receiveMany(rows) {
+/** Несколько позиций: по каждой своё количество, 0 — пропустить. */
+function receiveManyForm(rows) {
   if (!rows.length || !requireActor()) return;
+  openModal(`Приёмка: ${rows.length} ${plural(rows.length, 'позиция', 'позиции', 'позиций')}`, `
+    <p class="muted small" style="margin:0 0 12px">Сколько привезли по каждой позиции. Не всё — укажите сколько есть,
+      остальное будет ждать. 0 — пропустить позицию.</p>
+    <div class="multi-list">${rows.map((row) => `
+      <div class="multi-row">
+        <div class="multi-main">
+          <div class="multi-name">${esc(row.name)}</div>
+          <div class="stock-meta">${esc(row.stock_code || '')} · заказано ${row.qty_number !== null ? num(row.qty_number) : '—'}
+            ${esc(row.qty_unit || '')}${row.received ? ` · уже принято ${num(row.received)}` : ''}</div>
+        </div>
+        <label class="multi-qty">
+          <input type="number" class="qty-input" data-qty="${row.id}" min="0" step="any" value="${num(leftToReceive(row))}">
+          <span class="muted small">${esc(row.qty_unit || 'шт')}</span>
+        </label>
+      </div>`).join('')}
+    </div>
+    <button class="btn btn-primary btn-lg btn-block" id="f-ok" style="margin-top:14px">Принять</button>`);
+  el('f-ok').addEventListener('click', () => {
+    const entries = rows.map((row) => {
+      const quantity = Number(el('modal-body').querySelector(`[data-qty="${row.id}"]`).value || 0);
+      // если количество в заявке неизвестно — принятое закрывает позицию
+      return { row, quantity, close: row.qty_number === null };
+    }).filter((entry) => entry.quantity > 0);
+    if (!entries.length) { toast('Укажите количество хотя бы по одной позиции'); return; }
+    receiveMany(entries);
+  });
+}
+
+/** Приёмка нескольких позиций с количеством по каждой. */
+async function receiveMany(entries) {
+  if (!entries.length || !requireActor()) return;
   const results = [];
-  for (const row of rows) {
+  for (const { row, quantity, close } of entries) {
     try {
       const result = await post('/api/stock/movement', {
-        kind: 'in', item_id: row.id, quantity: leftToReceive(row), close: true, ...actorPayload(),
+        kind: 'in', item_id: row.id, quantity, close, ...actorPayload(),
       });
-      results.push({ row, result });
+      results.push({ row, quantity, result });
     } catch (error) { /* покажем итог ниже */ }
   }
   const notified = results.filter((r) => r.result.author_notified).length;
   const arrived = results.filter((r) => r.result.request_arrived).length;
   const extra = notified ? ` · заказчикам отправлено сообщений: ${notified}` : arrived ? ' · заявки собраны' : '';
-  toast(`Принято позиций: ${results.length} из ${rows.length}${extra}`);
+  toast(`Принято позиций: ${results.length} из ${entries.length}${extra}`);
   await route();
   if (results.length) await afterReceiveMany(results);
 }
@@ -728,14 +762,19 @@ async function afterReceiveMany(results) {
   const productIds = new Set(results.map((r) => r.result.item && r.result.item.product_id));
   const bulk = bulkItems(zone).filter((i) => productIds.has(i.product_id));
   const instances = zone.instances.filter((i) => codes.includes(i.code));
-  const received = Object.fromEntries(results.map((r) => [r.result.item && r.result.item.product_id, leftToReceive(r.row)]));
+  const received = {};
+  for (const r of results) {
+    const id = r.result.item && r.result.item.product_id;
+    received[id] = (received[id] || 0) + r.quantity;
+  }
   const categoryId = (bulk[0] || instances[0] || {}).category_id;
 
   openModal(`Принято позиций: ${results.length}`, `
     <div class="pick-list" style="margin-bottom:14px">
-      ${results.map((r) => `<div class="pick-line">${esc(r.row.name)} <span class="code-chip">${esc(r.row.stock_code || '')}</span></div>`).join('')}
+      ${results.map((r) => `<div class="pick-line">${esc(r.row.name)} <span class="code-chip">${esc(r.row.stock_code || '')}</span>
+        <b style="float:right">${num(r.quantity)} ${esc(r.row.qty_unit || '')}</b></div>`).join('')}
     </div>
-    <a class="btn btn-lg btn-block" href="${labelsUrl(codes)}" target="_blank" rel="noopener" style="margin-bottom:16px">Напечатать наклейки одним листом</a>
+    <a class="btn btn-primary btn-lg btn-block" href="${labelsUrl(codes)}" target="_blank" rel="noopener" style="margin-bottom:16px">Напечатать все наклейки одним листом (${codes.length})</a>
     ${hasPlaces() && (bulk.length || instances.length) ? `
       <div class="form-row"><label>Положить всё в одно место (необязательно)</label>
         <select id="f-loc">${locationOptions(categoryId)}</select></div>
