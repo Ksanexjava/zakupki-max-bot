@@ -407,15 +407,14 @@ el('scan-overlay-close').addEventListener('click', () => closePickScanner());
 
 const VIEWS = {
   priemka: { title: 'Приёмка', render: viewReceiving },
-  razmeshchenie: { title: 'Размещение', render: viewPlacement },
   hranenie: { title: 'Хранение', render: viewStorage },
   vydacha: { title: 'Выдача', render: viewIssue },
   scan: { title: 'Сканер', render: viewScan },
-  mesta: { title: 'Места', render: viewLocations },
-  qr: { title: 'QR-наклейки', render: viewQr },
   tovary: { title: 'Товары', render: viewProducts },
   istoriya: { title: 'История', render: viewHistory },
 };
+// старые адреса из закладок ведут в новые разделы
+const ALIASES = { razmeshchenie: 'priemka', mesta: 'scan', qr: 'scan' };
 
 function renderNav() {
   el('stock-nav').innerHTML = Object.entries(VIEWS).map(([key, view]) =>
@@ -429,7 +428,8 @@ function renderNav() {
 async function route() {
   Scanner.stop();
   closeModal();
-  const [, view, ...rest] = (location.hash || '#/priemka').split('/');
+  const [, raw, ...rest] = (location.hash || '#/priemka').split('/');
+  const view = ALIASES[raw] || raw;
   state.view = VIEWS[view] ? view : 'priemka';
   state.arg = rest.length ? decodeURIComponent(rest.join('/')) : null;
   renderNav();
@@ -453,12 +453,17 @@ async function refreshCounts() {
     api('/api/stock/queue?kind=on_hand'),
   ]);
   const set = (key, value) => { const n = el(`nav-count-${key}`); if (n) n.textContent = value || ''; };
-  set('priemka', pending.items.length);
-  set('razmeshchenie', bulkInZone(receiving).length + receiving.instances.length);
+  // ждём поставку + лежит неразложенным
+  set('priemka', pending.items.length + bulkItems(receiving).length + receiving.instances.length);
   set('vydacha', onHand.items.length);
 }
 
-/* ============================================================ приёмка */
+/* =============================================== приёмка и размещение */
+
+/** Поштучный товар показываем экземплярами, а не строкой количества (в приёмке и на полке). */
+const bulkItems = (zone) => zone.items.filter((i) => !zone.instances.some((x) => x.product_id === i.product_id));
+const hasPlaces = () => state.locations.some((l) => l.kind !== 'zone');
+const labelsUrl = (codes) => `/labels?codes=${encodeURIComponent(codes.join(','))}`;
 
 function requestCard(row, mode) {
   const ordered = row.qty_number;
@@ -486,12 +491,45 @@ function requestCard(row, mode) {
 }
 
 async function viewReceiving(root) {
-  const data = await api('/api/stock/queue?kind=pending');
+  await loadLocations();
+  const [data, zone] = await Promise.all([api('/api/stock/queue?kind=pending'), api('/api/stock/receiving')]);
+  const bulk = bulkItems(zone);
+  const waiting = bulk.length + zone.instances.length;
   root.innerHTML = `
-    <div class="view-head"><h2>Приёмка</h2></div>
-    <p class="view-hint">Позиции, которые закупки отметили заказанными. Принятое попадает в зону приёмки — потом его раскладывают по полкам в «Размещении».</p>
+    <div class="view-head"><h2>Приёмка и размещение</h2></div>
+    <p class="view-hint">Отметьте, что привезли, и сразу положите на полку или в коробку.
+      Что не успели разложить — ждёт ниже, в «Лежит в приёмке».</p>
+    ${hasPlaces() ? '' : `<p class="view-hint">Полок пока нет — заведите их в разделе <a href="#/scan">«Сканер»</a>,
+      тогда принятое можно будет сразу раскладывать.</p>`}
+
+    <div class="group-title">Ждём поставку${data.items.length ? ` · ${data.items.length}` : ''}</div>
     <div class="stock-list">${data.items.map((row) => requestCard(row, 'in')).join('')}</div>
-    ${data.items.length ? '' : '<p class="empty">Ничего не ждём — все заказы приняты.</p>'}`;
+    ${data.items.length ? '' : '<p class="empty">Ничего не ждём — все заказы приняты.</p>'}
+
+    <div class="group-title" style="margin-top:26px">Лежит в приёмке — разложить${waiting ? ` · ${waiting}` : ''}</div>
+    <div class="stock-list">
+      ${zone.instances.map((i) => `
+        <article class="stock-card">
+          <div class="stock-main">
+            <div class="stock-name">${esc(i.product_name)} <span class="code-chip">${esc(i.code)}</span></div>
+            <div class="stock-meta">поштучно · ${esc(state.catPath[i.category_id] || 'без категории')}</div>
+          </div>
+          <div class="stock-actions">
+            <a class="btn btn-lg" href="${labelsUrl([i.code])}" target="_blank" rel="noopener">QR</a>
+            <button class="btn btn-primary btn-lg" data-place-inst="${i.id}">Разместить</button>
+          </div>
+        </article>`).join('')}
+      ${bulk.map((i) => `
+        <article class="stock-card">
+          <div class="stock-main">
+            <div class="stock-name">${esc(i.name)}</div>
+            <div class="stock-meta">${esc(i.path)}</div>
+          </div>
+          <div class="stock-qty"><div class="big">${num(i.quantity)}</div><div class="sub">${esc(i.unit || '')}</div></div>
+          <div class="stock-actions"><button class="btn btn-primary btn-lg" data-place="${i.product_id}">Разместить</button></div>
+        </article>`).join('')}
+    </div>
+    ${waiting ? '' : '<p class="empty">Всё разложено по местам.</p>'}`;
 
   const rows = Object.fromEntries(data.items.map((r) => [r.id, r]));
   root.querySelectorAll('[data-full]').forEach((b) => b.addEventListener('click', () => {
@@ -500,6 +538,12 @@ async function viewReceiving(root) {
     receive(row, left, true);
   }));
   root.querySelectorAll('[data-part]').forEach((b) => b.addEventListener('click', () => receiveForm(rows[b.dataset.part])));
+  root.querySelectorAll('[data-place]').forEach((b) => b.addEventListener('click', () => {
+    placeForm(bulk.find((i) => String(i.product_id) === b.dataset.place));
+  }));
+  root.querySelectorAll('[data-place-inst]').forEach((b) => b.addEventListener('click', () => {
+    placeForm(null, zone.instances.find((i) => String(i.id) === b.dataset.placeInst));
+  }));
 }
 
 function receiveForm(row) {
@@ -526,70 +570,71 @@ async function receive(row, quantity, close, note = '') {
   const result = await post('/api/stock/movement', {
     kind: 'in', item_id: row.id, quantity, close, note, ...actorPayload(),
   });
-  closeModal();
-  const parts = ['Принято, лежит в зоне приёмки'];
+  const parts = ['Принято'];
   if (result.request_arrived) parts.push(result.author_notified ? 'автору отправлено сообщение' : 'заявка собрана');
   toast(parts.join(' · '));
-  await route();  // перерисовка закрывает модалки — окно с наклейками открываем после
-  if (result.instances_created && result.instances_created.length) {
-    const codes = result.instances_created.join(',');
-    openModal('Крупный товар — нужны наклейки', `
-      <p>Товар учитывается поштучно. Заведены инвентарные номера: <b>${esc(result.instances_created.join(', '))}</b>.</p>
-      <p class="muted">Наклейте QR на каждую единицу, затем разместите на полку.</p>
-      <div class="row-actions">
-        <a class="btn btn-primary btn-lg" href="/labels?codes=${encodeURIComponent(codes)}" target="_blank" rel="noopener">Напечатать наклейки</a>
-        <a class="btn btn-lg" href="#/razmeshchenie">К размещению</a>
-      </div>`);
-  }
+  await route();  // перерисовка закрывает модалки — следующий шаг открываем после
+  if (quantity > 0) await afterReceive(result);
 }
 
-/* ========================================================== размещение */
+/** Сразу после приёмки: наклейки для поштучного товара и выбор места. */
+async function afterReceive(result) {
+  const codes = result.instances_created || [];
+  const zone = await api('/api/stock/receiving');
+  if (codes.length) {
+    placeInstancesForm(zone.instances.filter((i) => codes.includes(i.code)), codes);
+    return;
+  }
+  if (!hasPlaces()) return;
+  const item = bulkItems(zone).find((i) => i.product_id === (result.item && result.item.product_id));
+  if (item) placeForm(item, null, null, 'Принято — куда положить?');
+}
 
-/** Поштучный товар в приёмке показываем экземплярами, а не строкой количества. */
-const bulkInZone = (zone) => zone.items.filter((i) => !zone.instances.some((x) => x.product_id === i.product_id));
-
-async function viewPlacement(root) {
-  await loadLocations();
-  const data = await api('/api/stock/receiving');
-  const shelves = state.locations.filter((l) => l.kind !== 'zone');
-  root.innerHTML = `
-    <div class="view-head"><h2>Размещение</h2></div>
-    <p class="view-hint">Что лежит в зоне приёмки. Выберите полку или коробку — или отсканируйте её QR.</p>
-    ${shelves.length ? '' : '<p class="empty">Сначала заведите полки и коробки в разделе <a href="#/mesta">«Места»</a>.</p>'}
-    <div class="stock-list">
-      ${data.instances.map((i) => `
-        <article class="stock-card">
-          <div class="stock-main">
-            <div class="stock-name">${esc(i.product_name)} <span class="code-chip">${esc(i.code)}</span></div>
-            <div class="stock-meta">поштучный учёт · ${esc(state.catPath[i.category_id] || 'без категории')}</div>
-          </div>
-          <div class="stock-actions"><button class="btn btn-primary btn-lg" data-place-inst="${i.id}">Разместить</button></div>
-        </article>`).join('')}
-      ${bulkInZone(data).map((i) => `
-        <article class="stock-card">
-          <div class="stock-main">
-            <div class="stock-name">${esc(i.name)}</div>
-            <div class="stock-meta">${esc(i.path)}</div>
-          </div>
-          <div class="stock-qty"><div class="big">${num(i.quantity)}</div><div class="sub">${esc(i.unit || '')} в приёмке</div></div>
-          <div class="stock-actions"><button class="btn btn-primary btn-lg" data-place="${i.product_id}">Разместить</button></div>
-        </article>`).join('')}
-    </div>
-    ${(data.items.length || data.instances.length) ? '' : '<p class="empty">Зона приёмки пуста — всё разложено.</p>'}`;
-
-  root.querySelectorAll('[data-place]').forEach((b) => b.addEventListener('click', () => {
-    placeForm(data.items.find((i) => String(i.product_id) === b.dataset.place));
-  }));
-  root.querySelectorAll('[data-place-inst]').forEach((b) => b.addEventListener('click', () => {
-    placeForm(null, data.instances.find((i) => String(i.id) === b.dataset.placeInst));
-  }));
+/** Поштучный товар: печать наклеек и одно место для всех единиц сразу. */
+function placeInstancesForm(instances, codes) {
+  const categoryId = instances.length ? instances[0].category_id : null;
+  openModal('Принято поштучно', `
+    <div class="stock-name">${esc(instances.length ? instances[0].product_name : '')}</div>
+    <div class="stock-meta" style="margin-bottom:12px">Каждой единице присвоен номер:
+      ${codes.map((c) => `<span class="code-chip">${esc(c)}</span>`).join(' ')}</div>
+    <a class="btn btn-lg btn-block" href="${labelsUrl(codes)}" target="_blank" rel="noopener" style="margin-bottom:16px">Напечатать наклейки</a>
+    ${hasPlaces() ? `
+      <div class="form-row"><label>Куда поставить</label>
+        <select id="f-loc">${locationOptions(categoryId)}</select></div>
+      <div class="row-actions">
+        <button class="btn btn-lg" id="f-scan">Сканировать полку</button>
+        <button class="btn btn-primary btn-lg" id="f-ok">Поставить ${instances.length > 1 ? 'все' : ''}</button>
+      </div>
+      <button class="btn btn-quiet btn-block" id="f-later">Оставить в приёмке</button>` : `
+      <p class="muted">Полок пока нет — товар полежит в приёмке.</p>`}`);
+  if (!hasPlaces()) return;
+  el('f-later').addEventListener('click', closeModal);
+  el('f-scan').addEventListener('click', async () => {
+    const location = await pickLocationByScan();
+    if (location) { el('f-loc').value = location.id; toast(`Выбрано: ${location.code}`); }
+  });
+  el('f-ok').addEventListener('click', async () => {
+    if (!requireActor()) return;
+    const target = Number(el('f-loc').value);
+    if (!target) { toast('Выберите место'); return; }
+    let placed = 0;
+    for (const instance of instances) {
+      try {
+        await post('/api/stock/place', { instance_id: instance.id, to_location_id: target, ...actorPayload() });
+        placed += 1;
+      } catch (error) { /* покажем итог ниже */ }
+    }
+    toast(placed === instances.length ? 'Поставлено' : `Поставлено ${placed} из ${instances.length}`);
+    await route();
+  });
 }
 
 /** Форма размещения. item — товар количеством, instance — экземпляр поштучно. */
-function placeForm(item, instance = null, fromLocationId = null) {
+function placeForm(item, instance = null, fromLocationId = null, title = null) {
   if (!requireActor()) return;
+  if (!hasPlaces()) { toast('Сначала заведите полки в разделе «Сканер»'); return; }
   const categoryId = item ? item.category_id : instance.category_id;
-  openModal(instance ? 'Разместить экземпляр' : 'Разместить', `
+  openModal(title || (instance ? 'Разместить экземпляр' : 'Разместить'), `
     <div class="stock-name">${esc(item ? item.name : instance.product_name)}
       ${instance ? `<span class="code-chip">${esc(instance.code)}</span>` : ''}</div>
     <div class="stock-meta" style="margin-bottom:14px">${esc(state.catPath[categoryId] || 'без категории')}</div>
@@ -600,7 +645,9 @@ function placeForm(item, instance = null, fromLocationId = null) {
     <div class="row-actions">
       <button class="btn btn-lg" id="f-scan">Сканировать полку</button>
       <button class="btn btn-primary btn-lg" id="f-ok">Положить</button>
-    </div>`);
+    </div>
+    ${title ? '<button class="btn btn-quiet btn-block" id="f-later">Оставить в приёмке</button>' : ''}`);
+  if (title) el('f-later').addEventListener('click', closeModal);
   el('f-scan').addEventListener('click', async () => {
     const location = await pickLocationByScan();
     if (location) { el('f-loc').value = location.id; toast(`Выбрано: ${location.code}`); }
@@ -618,7 +665,7 @@ function placeForm(item, instance = null, fromLocationId = null) {
         ...actorPayload(),
       });
       closeModal();
-      toast(`Положено на ${result.to}`);
+      toast(`Положено: ${result.to}`);
       await route();
     } catch (error) {
       toast(explain(error));
@@ -628,48 +675,119 @@ function placeForm(item, instance = null, fromLocationId = null) {
 
 /* ============================================================ хранение */
 
+/** 1 товар, 2 товара, 5 товаров. */
+function plural(n, one, few, many) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+const productsCount = (n) => `${n} ${plural(n, 'товар', 'товара', 'товаров')}`;
+
+// какие разделы раскрыты — переживает перерисовку после выдачи
+const openGroups = new Set();
+
+/** Раскладывает остатки по дереву: раздел → подкатегория → товары. */
+function storageTree(products) {
+  const tops = state.categories.map((top) => ({
+    id: `t${top.id}`,
+    name: top.name,
+    direct: [],
+    subs: top.children.map((child) => ({ id: `s${child.id}`, name: child.name, products: [] })),
+  }));
+  const byTop = Object.fromEntries(state.categories.map((top, index) => [top.id, tops[index]]));
+  const none = { id: 'none', name: 'Без категории', direct: [], subs: [] };
+  for (const row of products) {
+    const cid = row.category_id;
+    const parent = state.catParent[cid];
+    if (parent && byTop[parent]) {
+      byTop[parent].subs.find((s) => s.id === `s${cid}`).products.push(row);
+    } else if (byTop[cid]) {
+      byTop[cid].direct.push(row);
+    } else {
+      none.direct.push(row);
+    }
+  }
+  return none.direct.length ? [...tops, none] : tops;
+}
+
+function productRow(row) {
+  return `
+    <div class="prod-row ${row.low ? 'low' : ''}">
+      <div class="prod-main">
+        <div class="prod-name">${esc(row.name)}${row.low ? '<span class="badge-low">мало</span>' : ''}</div>
+        <div class="place-chips">${row.places.map((p) =>
+          `<span class="place-chip">${esc(whereText(p.location_id, p.code))} · <b>${num(p.quantity)}</b></span>`).join('')}</div>
+      </div>
+      <div class="prod-qty"><b>${num(row.total)}</b> ${esc(row.unit || '')}
+        ${row.min_stock ? `<div class="sub">мин. ${num(row.min_stock)}</div>` : ''}</div>
+      <button class="btn" data-out="${row.product_id}">Выдать</button>
+    </div>`;
+}
+
 async function viewStorage(root) {
   await loadLocations();
   const data = await api('/api/stock/overview');
+  const products = data.products;
+  const lowCount = products.filter((r) => r.low).length;
+  const inZone = products.filter((r) => r.places.some((p) => whereText(p.location_id, p.code) === 'в приёмке')).length;
+
   root.innerHTML = `
     <div class="view-head"><h2>Хранение</h2></div>
+    <div class="dash-stats">
+      <div class="dash-stat"><div class="dash-num">${products.length}</div><div class="dash-label">${plural(products.length, 'товар', 'товара', 'товаров')} на складе</div></div>
+      <div class="dash-stat ${lowCount ? 'warn' : ''}"><div class="dash-num">${lowCount}</div><div class="dash-label">заканчивается</div></div>
+      <a class="dash-stat" href="#/priemka"><div class="dash-num">${inZone}</div><div class="dash-label">ждут размещения</div></a>
+    </div>
     <div class="search-row"><input type="search" id="f-search" placeholder="Поиск по названию"></div>
-    <div id="storage-list"></div>`;
+    <div id="storage-tree"></div>`;
 
   const draw = (query) => {
     const q = query.trim().toLowerCase();
-    const rows = data.products.filter((r) => !q || r.name.toLowerCase().includes(q));
-    if (!rows.length) {
-      el('storage-list').innerHTML = `<p class="empty">${data.products.length ? 'Ничего не нашлось.' : 'На складе пока пусто.'}</p>`;
-      return;
-    }
-    let html = '';
-    let lastCategory = null;
-    let lastSub = null;
-    for (const row of rows) {
-      if (row.category !== lastCategory) {
-        html += `<div class="group-title">${esc(row.category)}</div>`;
-        lastCategory = row.category;
-        lastSub = null;
-      }
-      if (row.subcategory && row.subcategory !== lastSub) {
-        html += `<div class="subgroup-title">${esc(row.subcategory)}</div>`;
-        lastSub = row.subcategory;
-      }
-      html += `
-        <article class="stock-card ${row.low ? 'low' : ''}" style="margin-bottom:8px">
-          <div class="stock-main">
-            <div class="stock-name">${esc(row.name)}${row.low ? '<span class="badge-low">мало</span>' : ''}</div>
-            <div class="place-chips">${row.places.map((p) =>
-              `<span class="place-chip">${esc(whereText(p.location_id, p.code))} · <b>${num(p.quantity)}</b></span>`).join('')}</div>
+    const match = (row) => !q || row.name.toLowerCase().includes(q);
+    const tree = storageTree(products.filter(match));
+    const html = tree.map((top) => {
+      const subs = top.subs.filter((s) => s.products.length || !q);
+      const total = top.direct.length + top.subs.reduce((sum, s) => sum + s.products.length, 0);
+      if (q && !total) return '';
+      const low = [...top.direct, ...top.subs.flatMap((s) => s.products)].filter((r) => r.low).length;
+      const open = q ? total > 0 : openGroups.has(top.id);
+      return `
+        <details class="cat-block ${total ? '' : 'is-empty'}" data-group="${top.id}" ${open ? 'open' : ''}>
+          <summary class="cat-head">
+            <span class="cat-name">${esc(top.name)}</span>
+            <span class="cat-meta">${total ? productsCount(total) : 'пусто'}${low ? ` · <span class="warn-text">мало: ${low}</span>` : ''}</span>
+          </summary>
+          <div class="cat-body">
+            ${subs.map((sub) => {
+              const subLow = sub.products.filter((r) => r.low).length;
+              const subOpen = q ? sub.products.length > 0 : openGroups.has(sub.id);
+              return `
+                <details class="sub-block ${sub.products.length ? '' : 'is-empty'}" data-group="${sub.id}" ${subOpen ? 'open' : ''}>
+                  <summary class="sub-head">
+                    <span>${esc(sub.name)}</span>
+                    <span class="cat-meta">${sub.products.length ? productsCount(sub.products.length) : 'пусто'}${subLow ? ` · <span class="warn-text">мало: ${subLow}</span>` : ''}</span>
+                  </summary>
+                  <div class="sub-body">${sub.products.map(productRow).join('')}</div>
+                </details>`;
+            }).join('')}
+            ${top.direct.length ? `
+              <div class="sub-block direct">
+                ${top.subs.length ? '<div class="sub-head static">Без подкатегории</div>' : ''}
+                <div class="sub-body">${top.direct.map(productRow).join('')}</div>
+              </div>` : ''}
           </div>
-          <div class="stock-qty"><div class="big">${num(row.total)}</div><div class="sub">${esc(row.unit || '')}${row.min_stock ? ` · мин. ${num(row.min_stock)}` : ''}</div></div>
-          <div class="stock-actions"><button class="btn btn-primary btn-lg" data-out="${row.product_id}">Выдать</button></div>
-        </article>`;
-    }
-    el('storage-list').innerHTML = html;
-    el('storage-list').querySelectorAll('[data-out]').forEach((b) => b.addEventListener('click', () => {
-      issueForm(data.products.find((r) => String(r.product_id) === b.dataset.out));
+        </details>`;
+    }).join('');
+    el('storage-tree').innerHTML = html || `<p class="empty">${products.length ? 'Ничего не нашлось.' : 'На складе пока пусто.'}</p>`;
+
+    el('storage-tree').querySelectorAll('details[data-group]').forEach((node) => node.addEventListener('toggle', () => {
+      if (q) return;  // при поиске раскрытие временное
+      if (node.open) openGroups.add(node.dataset.group); else openGroups.delete(node.dataset.group);
+    }));
+    el('storage-tree').querySelectorAll('[data-out]').forEach((b) => b.addEventListener('click', () => {
+      issueForm(products.find((r) => String(r.product_id) === b.dataset.out));
     }));
   };
   draw('');
@@ -789,12 +907,22 @@ async function viewScan(root) {
   root.innerHTML = `
     <div class="view-head"><h2>Сканер</h2></div>
     ${scannerHtml('main')}
-    <div class="scan-result" id="scan-result"></div>`;
+    <div class="scan-result" id="scan-result"></div>
+
+    <div class="view-head places-head">
+      <h2>Места хранения</h2>
+      <button class="btn" id="m-print" disabled>QR на выбранные</button>
+      <button class="btn" id="m-add-box">+ Коробка</button>
+      <button class="btn btn-primary" id="m-add-shelf">+ Полка</button>
+    </div>
+    <p class="view-hint">У каждой полки и коробки свой QR. Назначьте месту категорию — при раскладке оно будет предлагаться первым.</p>
+    <div id="places"></div>`;
   bindScanner('main', (text) => showScanned(text));
+  renderPlaces(el('places'));
   if (state.arg) showScanned(state.arg);
 }
 
-async function showScanned(text) {
+async function showScanned(text, scroll = false) {
   const box = el('scan-result');
   if (!box) return;
   box.innerHTML = '<p class="muted">Ищу…</p>';
@@ -805,43 +933,82 @@ async function showScanned(text) {
     box.innerHTML = `<p class="empty">Код «${esc(text)}» не найден.</p>`;
     return;
   }
-  if (found.type === 'shelf' || found.type === 'box' || found.type === 'zone') return renderLocationCard(box, found.details);
-  if (found.type === 'instance') return renderInstanceCard(box, found.details);
-  if (found.type === 'position') return renderPositionCard(box, found.details);
+  // адрес с кодом: после обновления страницы карточка откроется снова
+  state.arg = found.code;
+  history.replaceState(null, '', `#/scan/${encodeURIComponent(found.code)}`);
+  if (found.type === 'shelf' || found.type === 'box' || found.type === 'zone') renderLocationCard(box, found.details);
+  else if (found.type === 'instance') renderInstanceCard(box, found.details);
+  else if (found.type === 'position') renderPositionCard(box, found.details);
+  if (scroll) box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function placeCounts(location) {
+  if (!location) return '';
+  return [
+    location.products ? productsCount(location.products) : '',
+    location.instances ? `${location.instances} шт. поштучно` : '',
+  ].filter(Boolean).join(' · ') || 'пусто';
 }
 
 function renderLocationCard(box, details) {
   const loc = details.location;
   const kind = loc.kind === 'box' ? 'Коробка' : loc.kind === 'zone' ? 'Зона' : 'Полка';
   const purpose = loc.category_ids.map((id) => state.catPath[id]).filter(Boolean).join(', ');
+  // назначение не задано — подсказываем по тому, что лежит на самом деле
+  const actual = [...new Set([
+    ...details.items.map((i) => i.path),
+    ...details.instances.map((i) => state.catPath[i.category_id]).filter(Boolean),
+  ])];
+  const parent = loc.parent_id ? state.locations.find((l) => l.id === loc.parent_id) : null;
+  const items = bulkItems(details);
+  const empty = !items.length && !details.instances.length && !details.boxes.length;
+
   box.innerHTML = `
     <div class="scan-card">
-      <div class="scan-kind">${kind} <span class="code-chip">${esc(loc.code)}</span></div>
-      <h3>${esc(loc.name)}</h3>
-      ${purpose ? `<div class="purpose">Хранится: ${esc(purpose)}</div>` : ''}
-      <div class="row-actions" style="margin-top:12px">
-        ${loc.kind !== 'zone' ? '<button class="btn btn-primary btn-lg" id="s-put">Положить сюда из приёмки</button>' : ''}
+      <div class="scan-top">
+        <div>
+          <div class="scan-kind">${kind} <span class="code-chip">${esc(loc.code)}</span>
+            ${parent ? ` на полке <button class="link-btn" data-open="${esc(parent.code)}">${esc(parent.code)}</button>` : ''}</div>
+          <h3>${esc(loc.name)}</h3>
+        </div>
+        ${loc.kind !== 'zone' ? `
+          <div class="scan-tools">
+            <a class="btn" href="${labelsUrl([loc.code])}" target="_blank" rel="noopener">QR</a>
+            <button class="btn" id="s-edit">Изменить</button>
+          </div>` : ''}
       </div>
+      <div class="purpose">${purpose
+        ? `Категория: <b>${esc(purpose)}</b>`
+        : actual.length ? `По содержимому: ${esc(actual.join(', '))}` : 'Категория не задана'}</div>
       <div class="scan-contents">
-        ${details.items.map((i) => `
+        ${items.map((i) => `
           <div class="scan-line">
-            <span>${esc(i.name)} — <b>${num(i.quantity)}</b> ${esc(i.unit || '')}</span>
+            <div class="scan-item">${esc(i.name)}<div class="small muted">${esc(i.path)}</div></div>
+            <div class="scan-qty"><b>${num(i.quantity)}</b> ${esc(i.unit || '')}</div>
             <button class="btn" data-take="${i.product_id}">Выдать</button>
           </div>`).join('')}
         ${details.instances.map((i) => `
           <div class="scan-line">
-            <span>${esc(i.product_name)} <span class="code-chip">${esc(i.code)}</span></span>
+            <div class="scan-item">${esc(i.product_name)} <span class="code-chip">${esc(i.code)}</span></div>
+            <div class="scan-qty"><b>1</b> шт</div>
             <button class="btn" data-take-inst="${i.id}">Выдать</button>
           </div>`).join('')}
         ${details.boxes.map((b) => `
-          <div class="scan-line"><span>Коробка ${esc(b.name)}</span>
-            <a class="btn" href="#/scan/${encodeURIComponent(b.code)}">${esc(b.code)}</a></div>`).join('')}
-        ${(details.items.length || details.instances.length || details.boxes.length) ? '' : '<p class="muted">Здесь пока ничего нет.</p>'}
+          <div class="scan-line">
+            <div class="scan-item">Коробка «${esc(b.name)}» <span class="code-chip">${esc(b.code)}</span></div>
+            <div class="scan-qty muted">${esc(placeCounts(state.locations.find((l) => l.id === b.id)))}</div>
+            <button class="btn" data-open="${esc(b.code)}">Открыть</button>
+          </div>`).join('')}
+        ${empty ? '<p class="muted">Здесь пока ничего нет.</p>' : ''}
       </div>
+      ${loc.kind !== 'zone' ? '<button class="btn btn-primary btn-lg btn-block" id="s-put" style="margin-top:14px">Положить сюда из приёмки</button>' : ''}
     </div>`;
 
   const put = el('s-put');
   if (put) put.addEventListener('click', () => putHereForm(loc));
+  const edit = el('s-edit');
+  if (edit) edit.addEventListener('click', () => locationForm(loc.kind, loc));
+  box.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => showScanned(b.dataset.open)));
   box.querySelectorAll('[data-take]').forEach((b) => b.addEventListener('click', () => {
     const item = details.items.find((i) => String(i.product_id) === b.dataset.take);
     issueForm({
@@ -859,7 +1026,7 @@ function renderLocationCard(box, details) {
 async function putHereForm(location) {
   if (!requireActor()) return;
   const zone = await api('/api/stock/receiving');
-  const bulk = bulkInZone(zone);
+  const bulk = bulkItems(zone);
   if (!bulk.length && !zone.instances.length) { toast('Зона приёмки пуста'); return; }
   openModal(`Положить на ${location.code}`, `
     <div class="form-row"><label>Что кладём</label>
@@ -968,58 +1135,33 @@ function renderPositionCard(box, item) {
 
 /* =============================================================== места */
 
-async function viewLocations(root) {
-  await loadLocations();
+/** Список полок с коробками под сканером. */
+function renderPlaces(root) {
   const shelves = state.locations.filter((l) => l.kind === 'shelf');
   const boxes = state.locations.filter((l) => l.kind === 'box');
   const purpose = (l) => l.category_ids.map((id) => state.catPath[id]).filter(Boolean).join(', ');
-  const counts = (l) => [l.products ? `товаров: ${l.products}` : '', l.instances ? `экземпляров: ${l.instances}` : '']
-    .filter(Boolean).join(' · ') || 'пусто';
+  const row = (l, cls) => `
+    <div class="${cls}">
+      <input type="checkbox" class="check" data-sel="${l.id}" aria-label="Выбрать ${esc(l.code)}">
+      <span class="code-chip">${esc(l.code)}</span>
+      <span class="place-name">${esc(l.name)}
+        <span class="small muted">${esc(placeCounts(l))}${purpose(l) ? ` · ${esc(purpose(l))}` : ''}</span></span>
+      <button class="btn" data-open="${esc(l.code)}">Открыть</button>
+    </div>`;
 
   root.innerHTML = `
-    <div class="view-head">
-      <h2>Места хранения</h2>
-      <button class="btn" id="m-print" disabled>Наклейки на выбранные</button>
-      <button class="btn" id="m-add-box">+ Коробка</button>
-      <button class="btn btn-primary" id="m-add-shelf">+ Полка</button>
-    </div>
-    <p class="view-hint">У каждой полки и коробки свой QR. Назначьте полке категории — при размещении она будет предлагаться первой.</p>
     <div class="stock-list">
       ${shelves.map((s) => `
         <div class="shelf-card">
-          <div class="shelf-head">
-            <input type="checkbox" class="check" data-sel="${s.id}">
-            <span class="code-chip">${esc(s.code)}</span>
-            <span class="shelf-name">${esc(s.name)}</span>
-            <span class="muted" style="font-size:13px">${counts(s)}</span>
-            <span class="spacer"></span>
-            <a class="btn" href="#/scan/${encodeURIComponent(s.code)}">Открыть</a>
-            <button class="btn" data-edit="${s.id}">Изменить</button>
-          </div>
-          ${purpose(s) ? `<div class="purpose">Хранится: ${esc(purpose(s))}</div>` : '<div class="purpose">Назначение не задано</div>'}
-          ${boxes.filter((b) => b.parent_id === s.id).length ? `
-            <div class="shelf-boxes">${boxes.filter((b) => b.parent_id === s.id).map((b) => `
-              <div class="box-row">
-                <input type="checkbox" class="check" data-sel="${b.id}">
-                <span class="code-chip">${esc(b.code)}</span>
-                <span>${esc(b.name)}</span>
-                <span class="muted" style="font-size:13px">${counts(b)}</span>
-                <span class="spacer"></span>
-                <a class="btn" href="#/scan/${encodeURIComponent(b.code)}">Открыть</a>
-                <button class="btn" data-edit="${b.id}">Изменить</button>
-              </div>`).join('')}</div>` : ''}
+          ${row(s, 'shelf-head')}
+          ${boxes.some((b) => b.parent_id === s.id) ? `
+            <div class="shelf-boxes">${boxes.filter((b) => b.parent_id === s.id).map((b) => row(b, 'box-row')).join('')}</div>` : ''}
         </div>`).join('')}
-      ${boxes.filter((b) => !b.parent_id).map((b) => `
+      ${boxes.some((b) => !b.parent_id) ? `
         <div class="shelf-card">
-          <div class="shelf-head">
-            <input type="checkbox" class="check" data-sel="${b.id}">
-            <span class="code-chip">${esc(b.code)}</span>
-            <span class="shelf-name">${esc(b.name)}</span>
-            <span class="muted" style="font-size:13px">коробка без полки · ${counts(b)}</span>
-            <span class="spacer"></span>
-            <button class="btn" data-edit="${b.id}">Изменить</button>
-          </div>
-        </div>`).join('')}
+          <div class="small muted" style="margin-bottom:6px">Коробки не на полке</div>
+          ${boxes.filter((b) => !b.parent_id).map((b) => row(b, 'box-row')).join('')}
+        </div>` : ''}
     </div>
     ${shelves.length || boxes.length ? '' : '<p class="empty">Мест пока нет. Начните с полок: «+ Полка».</p>'}`;
 
@@ -1032,10 +1174,7 @@ async function viewLocations(root) {
   });
   el('m-add-shelf').addEventListener('click', () => locationForm('shelf'));
   el('m-add-box').addEventListener('click', () => locationForm('box'));
-  root.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => {
-    const loc = state.locations.find((l) => String(l.id) === b.dataset.edit);
-    locationForm(loc.kind, loc);
-  }));
+  root.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => showScanned(b.dataset.open, true)));
 }
 
 function locationForm(kind, existing = null) {
@@ -1072,51 +1211,15 @@ function locationForm(kind, existing = null) {
       ? await post(`/api/stock/locations/${existing.id}`, payload)
       : await post('/api/stock/locations', payload);
     closeModal();
-    toast(existing ? 'Сохранено' : `Создано: ${result.location.code}`);
-    await route();
+    toast(existing ? 'Сохранено' : `Создано: ${result.location.code} — напечатайте для него QR`);
+    await loadLocations();
+    if (state.view === 'scan') {
+      renderPlaces(el('places'));
+      showScanned(result.location.code, !existing);
+    } else {
+      await route();
+    }
   });
-}
-
-/* =========================================================== QR-наклейки */
-
-async function viewQr(root) {
-  await loadLocations();
-  const instances = (await api('/api/stock/instances')).instances.filter((i) => i.status === 'stock');
-  const places = state.locations.filter((l) => l.kind !== 'zone');
-  root.innerHTML = `
-    <div class="view-head"><h2>Генератор QR-наклеек</h2>
-      <button class="btn btn-primary" id="q-print" disabled>Напечатать выбранное</button></div>
-    <p class="view-hint">Лист А4 под самоклейку 70×37 мм. В QR зашита ссылка — её откроет и обычная камера телефона.</p>
-
-    <div class="group-title">Полки и коробки</div>
-    <div class="pick-list" style="max-height:none">
-      ${places.map((l) => `<label><input type="checkbox" class="check" data-code="${esc(l.code)}">
-        <span class="code-chip">${esc(l.code)}</span> ${esc(l.name)}</label>`).join('') || '<p class="muted">Мест пока нет — создайте их в разделе «Места».</p>'}
-    </div>
-
-    <div class="group-title">Крупный товар на складе</div>
-    <div class="pick-list" style="max-height:none">
-      ${instances.map((i) => `<label><input type="checkbox" class="check" data-code="${esc(i.code)}">
-        <span class="code-chip">${esc(i.code)}</span> ${esc(i.product_name)}</label>`).join('') || '<p class="muted">Поштучного товара пока нет.</p>'}
-    </div>
-
-    <div class="group-title">Позиции заявки</div>
-    <div class="inline-row" style="max-width:420px">
-      <input type="number" id="q-request" placeholder="номер заявки, например 47">
-      <a class="btn" id="q-request-go" style="flex:0" target="_blank" rel="noopener">Наклейки заявки</a>
-    </div>`;
-
-  const chosen = () => [...root.querySelectorAll('[data-code]:checked')].map((c) => c.dataset.code);
-  root.querySelectorAll('[data-code]').forEach((c) => c.addEventListener('change', () => {
-    el('q-print').disabled = !chosen().length;
-  }));
-  el('q-print').addEventListener('click', () => {
-    window.open(`/labels?codes=${encodeURIComponent(chosen().join(','))}`, '_blank', 'noopener');
-  });
-  const go = el('q-request-go');
-  const sync = () => { go.href = `/labels?request=${encodeURIComponent(el('q-request').value || '')}`; };
-  el('q-request').addEventListener('input', sync);
-  sync();
 }
 
 /* ============================================================== товары */

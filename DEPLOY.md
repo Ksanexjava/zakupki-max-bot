@@ -238,6 +238,35 @@ HTTPS нужен не только для безопасного входа: б�
 Решите с адресом **до печати наклеек**: адрес из `PANEL_PUBLIC_URL` зашивается
 в QR, после переезда на другой домен наклейки придётся перепечатать.
 
+### Пока без домена: портал по IP
+
+nginx показывает портал на 80-м порту по адресу `http://IP-сервера`, без `:8080`.
+
+```bash
+sudo apt install -y nginx
+sudo cp deploy/nginx-ip.conf.example /etc/nginx/sites-available/zakupki-ip
+sudo ln -sf /etc/nginx/sites-available/zakupki-ip /etc/nginx/sites-enabled/zakupki-ip
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+В `.env`:
+
+```
+PANEL_PUBLIC_URL=http://IP-сервера
+PANEL_BIND=127.0.0.1
+PANEL_SECURE_COOKIE=false
+```
+
+Наклейки, напечатанные сейчас, будут вести на `http://IP-сервера/s/КОД`.
+Когда купите домен, не удаляйте этот конфиг, а замените в нём `location`
+на редирект на домен (пример в самом файле). Тогда старые наклейки продолжат
+работать, пока у сервера тот же IP.
+
+Пока HTTPS нет, логин и пароль идут по сети открытым текстом, а живая камера
+в браузере не включается. Сканировать можно обычной камерой телефона или
+кнопкой «Сфотографировать QR».
+
 ```bash
 sudo apt install -y nginx certbot python3-certbot-nginx
 sudo cp deploy/nginx.conf.example /etc/nginx/sites-available/zakupki

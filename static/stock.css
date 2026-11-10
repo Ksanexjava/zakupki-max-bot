@@ -201,3 +201,68 @@ a.btn, a.btn:hover { text-decoration: none; }
 /* формы склада задают отступы сами — общий gap модалки здесь лишний */
 .modal-body { gap: 0; }
 .modal-body .row-actions, .modal-body .btn-block { margin-top: 4px; }
+
+/* ---------------------------------------------------- хранение: дашборд */
+.dash-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
+.dash-stat {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px 14px; color: var(--text); text-decoration: none;
+}
+a.dash-stat:hover { border-color: var(--accent); }
+.dash-num { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.dash-label { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.dash-stat.warn .dash-num, .warn-text { color: var(--st-clarify); }
+
+.cat-block { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; }
+.cat-block.is-empty { opacity: .6; }
+.cat-head, .sub-head {
+  display: flex; align-items: center; gap: 10px; cursor: pointer; list-style: none;
+  padding: 12px 14px; user-select: none;
+}
+.cat-head::-webkit-details-marker, .sub-head::-webkit-details-marker { display: none; }
+.cat-head::before, .sub-head:not(.static)::before {
+  content: ""; width: 7px; height: 7px; flex: none;
+  border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted);
+  transform: rotate(-45deg); transition: transform .15s;
+}
+details[open] > .cat-head::before, details[open] > .sub-head::before { transform: rotate(45deg); }
+.cat-name { font-weight: 600; font-size: 15px; }
+.cat-meta { margin-left: auto; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.cat-body { padding: 0 10px 10px; }
+.sub-block { border-top: 1px solid var(--border-soft); }
+.sub-block.is-empty .sub-head { color: var(--muted); cursor: default; }
+.sub-head { padding: 10px 6px; font-size: 14px; }
+.sub-head.static { cursor: default; color: var(--muted); }
+.sub-body { padding: 0 0 6px 18px; }
+
+.prod-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 9px 10px; border: 1px solid var(--border-soft); border-radius: 6px; margin-bottom: 6px;
+}
+.prod-row.low { border-color: var(--st-clarify); }
+.prod-main { flex: 1; min-width: 180px; }
+.prod-name { font-weight: 500; }
+.prod-qty { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.prod-qty b { font-size: 17px; }
+.prod-qty .sub { color: var(--muted); font-size: 12px; }
+
+/* ------------------------------------------------- сканер: карточка места */
+.places-head { margin-top: 30px; }
+.scan-top { display: flex; align-items: flex-start; gap: 10px; justify-content: space-between; flex-wrap: wrap; }
+.scan-tools { display: flex; gap: 6px; }
+.scan-item { flex: 1; min-width: 160px; }
+.scan-qty { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.scan-qty b { font-size: 17px; }
+.small { font-size: 12px; }
+.link-btn { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; }
+.place-name { flex: 1; min-width: 140px; display: flex; flex-direction: column; }
+
+@media (max-width: 720px) {
+  .dash-stats { gap: 6px; }
+  .dash-stat { padding: 10px; }
+  .dash-num { font-size: 20px; }
+  .dash-label { font-size: 12px; }
+  .sub-body { padding-left: 4px; }
+  .prod-row .btn { width: 100%; }
+  .prod-qty { text-align: left; }
+}
