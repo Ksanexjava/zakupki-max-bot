@@ -196,7 +196,7 @@ function locationOptions(categoryId, excludeId) {
   const rest = usable.filter((l) => locationFit(l, categoryId) === 0);
   const opt = (l) => `<option value="${l.id}">${esc(locationLabel(l))}</option>`;
   const group = (label, rows) => (rows.length ? `<optgroup label="${label}">${rows.map(opt).join('')}</optgroup>` : '');
-  return group('Коробки и места этого подраздела', exact)
+  return group('Коробки этого подраздела', exact)
     + group('Полки этого раздела', section)
     + group(exact.length || section.length ? 'Остальные места' : 'Места', rest);
 }
@@ -1214,11 +1214,10 @@ async function viewScan(root) {
       <h2>Места хранения</h2>
       <button class="btn" id="m-print" disabled>QR на выбранные</button>
       <button class="btn" id="m-add-box">+ Коробка</button>
-      <button class="btn" id="m-add-lot">+ Место на полке</button>
       <button class="btn btn-primary" id="m-add-shelf">+ Полка</button>
     </div>
-    <p class="view-hint">Полка — целиком под раздел (Медицина). На ней коробки для мелочи и места для товара без коробки —
-      каждое под свой подраздел (Медицина → Расходники) и со своим QR. При раскладке они предлагаются первыми.</p>
+    <p class="view-hint">Полка — целиком под раздел (Медицина). На ней коробки для мелочи, каждая под свой подраздел
+      (Медицина → Расходники) и со своим QR. Крупный товар получает свой QR при приёмке и ставится прямо на полку.</p>
     <div id="places"></div>`;
   bindScanner('main', (text) => showScanned(text));
   renderPlaces(el('places'));
@@ -1316,7 +1315,6 @@ function renderLocationCard(box, details) {
       ${loc.kind === 'shelf' ? `
         <div class="row-actions" style="margin-top:12px">
           <button class="btn" id="s-add-box">+ Коробка на эту полку</button>
-          <button class="btn" id="s-add-lot">+ Место на этой полке</button>
         </div>` : ''}
       ${loc.kind !== 'zone' ? '<button class="btn btn-primary btn-lg btn-block" id="s-put" style="margin-top:14px">Положить сюда из приёмки</button>' : ''}
     </div>`;
@@ -1327,7 +1325,6 @@ function renderLocationCard(box, details) {
   if (edit) edit.addEventListener('click', () => locationForm(loc.kind, loc));
   if (el('s-delete')) el('s-delete').addEventListener('click', () => deleteLocationForm(loc));
   if (el('s-add-box')) el('s-add-box').addEventListener('click', () => locationForm('box', null, loc.id));
-  if (el('s-add-lot')) el('s-add-lot').addEventListener('click', () => locationForm('lot', null, loc.id));
   box.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => showScanned(b.dataset.open)));
   box.querySelectorAll('[data-take]').forEach((b) => b.addEventListener('click', () => {
     const item = details.items.find((i) => String(i.product_id) === b.dataset.take);
@@ -1376,7 +1373,7 @@ async function putHereForm(location) {
       });
       closeModal();
       toast(`Положено на ${location.code}`);
-      showScanned(location.code);
+      await route();
     } catch (error) {
       toast(explain(error));
     }
@@ -1431,7 +1428,7 @@ function issueInstanceForm(inst) {
       });
       closeModal();
       toast('Выдано');
-      if (state.view === 'scan') showScanned(inst.code); else await route();
+      await route();
     } catch (error) {
       toast(explain(error));
     }
@@ -1456,46 +1453,126 @@ function renderPositionCard(box, item) {
 
 /* =============================================================== места */
 
-/** Список полок с их коробками и местами — под сканером. */
-function renderPlaces(root) {
-  const shelves = state.locations.filter((l) => l.kind === 'shelf');
-  const children = state.locations.filter((l) => ON_SHELF.includes(l.kind));
-  const row = (l, cls) => `
+// какие полки и коробки раскрыты в списке — переживает перерисовку после действий
+const openPlaces = new Set();
+
+function placeRow(l, cls) {
+  const open = openPlaces.has(l.id);
+  return `
     <div class="${cls}">
       <input type="checkbox" class="check" data-sel="${l.id}" aria-label="Выбрать ${esc(l.code)}">
       <span class="code-chip">${esc(l.code)}</span>
-      <span class="place-name">${l.kind === 'lot' ? '<span class="kind-tag">место</span>' : ''}${esc(l.name)}
+      <span class="place-name">${esc(l.name)}
         <span class="small muted">${esc(placeCounts(l))}${purposeOf(l.id) ? ` · ${esc(purposeOf(l.id))}` : ''}</span></span>
-      <button class="btn" data-open="${esc(l.code)}">Открыть</button>
-    </div>`;
+      <button class="btn" data-toggle="${l.id}" aria-expanded="${open}">${open ? 'Свернуть' : 'Открыть'}</button>
+    </div>
+    <div class="place-detail" data-detail="${l.id}" ${open ? '' : 'hidden'}></div>`;
+}
 
+/** Список полок под сканером. Полка раскрывается прямо под собой: что на ней, её коробки, действия. */
+function renderPlaces(root) {
+  const shelves = state.locations.filter((l) => l.kind === 'shelf');
+  const loose = state.locations.filter((l) => ON_SHELF.includes(l.kind) && !l.parent_id);
   root.innerHTML = `
     <div class="stock-list">
-      ${shelves.map((s) => `
-        <div class="shelf-card">
-          ${row(s, 'shelf-head')}
-          ${children.some((c) => c.parent_id === s.id) ? `
-            <div class="shelf-boxes">${children.filter((c) => c.parent_id === s.id).map((c) => row(c, 'box-row')).join('')}</div>` : ''}
-        </div>`).join('')}
-      ${children.some((c) => !c.parent_id) ? `
+      ${shelves.map((s) => `<div class="shelf-card">${placeRow(s, 'shelf-head')}</div>`).join('')}
+      ${loose.length ? `
         <div class="shelf-card">
           <div class="small muted" style="margin-bottom:6px">Коробки не на полке</div>
-          ${children.filter((c) => !c.parent_id).map((c) => row(c, 'box-row')).join('')}
+          ${loose.map((b) => placeRow(b, 'box-row')).join('')}
         </div>` : ''}
     </div>
-    ${shelves.length || children.length ? '' : '<p class="empty">Мест пока нет. Начните с полок: «+ Полка».</p>'}`;
+    ${shelves.length || loose.length ? '' : '<p class="empty">Мест пока нет. Начните с полок: «+ Полка».</p>'}`;
 
   const selected = () => [...root.querySelectorAll('[data-sel]:checked')].map((c) => c.dataset.sel);
-  root.querySelectorAll('[data-sel]').forEach((c) => c.addEventListener('change', () => {
-    el('m-print').disabled = !selected().length;
-  }));
-  el('m-print').addEventListener('click', () => {
-    window.open(`/labels?locations=${selected().join(',')}`, '_blank', 'noopener');
+  root.addEventListener('change', (event) => {
+    if (event.target.matches('[data-sel]')) el('m-print').disabled = !selected().length;
   });
-  el('m-add-shelf').addEventListener('click', () => locationForm('shelf'));
-  el('m-add-box').addEventListener('click', () => locationForm('box'));
-  el('m-add-lot').addEventListener('click', () => locationForm('lot'));
-  root.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => showScanned(b.dataset.open, true)));
+  el('m-print').onclick = () => window.open(`/labels?locations=${selected().join(',')}`, '_blank', 'noopener');
+  el('m-add-shelf').onclick = () => locationForm('shelf');
+  el('m-add-box').onclick = () => locationForm('box');
+  bindPlaceToggles(root);
+  // раскрытые до перерисовки — раскрываем снова
+  root.querySelectorAll('.place-detail:not([hidden])').forEach((detail) => renderPlaceDetail(detail, Number(detail.dataset.detail)));
+}
+
+function bindPlaceToggles(scope) {
+  scope.querySelectorAll('[data-toggle]').forEach((button) => {
+    if (button.dataset.bound) return;
+    button.dataset.bound = '1';
+    button.addEventListener('click', () => {
+      const id = Number(button.dataset.toggle);
+      const detail = scope.querySelector(`[data-detail="${id}"]`);
+      const open = detail.hidden;
+      detail.hidden = !open;
+      button.textContent = open ? 'Свернуть' : 'Открыть';
+      button.setAttribute('aria-expanded', String(open));
+      if (open) { openPlaces.add(id); renderPlaceDetail(detail, id); } else { openPlaces.delete(id); }
+    });
+  });
+}
+
+/** Что внутри полки или коробки и что с ней можно сделать. */
+async function renderPlaceDetail(container, id) {
+  container.innerHTML = '<p class="muted small">Загружаю…</p>';
+  let details;
+  try {
+    details = await api(`/api/stock/locations/${id}`);
+  } catch (error) {
+    container.innerHTML = '<p class="muted small">Не удалось загрузить.</p>';
+    return;
+  }
+  const loc = details.location;
+  const items = bulkItems(details);
+  const boxes = state.locations.filter((l) => l.parent_id === loc.id);
+  const isShelf = loc.kind === 'shelf';
+  container.innerHTML = `
+    <div class="detail-actions">
+      <button class="btn btn-primary" data-act="put">Положить сюда из приёмки</button>
+      ${isShelf ? '<button class="btn" data-act="add-box">+ Коробка на эту полку</button>' : ''}
+      <a class="btn" href="${labelsUrl([loc.code])}" target="_blank" rel="noopener">QR</a>
+      <button class="btn" data-act="edit">Изменить</button>
+      <button class="btn btn-danger" data-act="delete">Удалить</button>
+    </div>
+    ${items.length || details.instances.length ? `
+      <div class="detail-title">${isShelf ? 'Лежит на полке' : 'В коробке'}</div>
+      ${items.map((i) => `
+        <div class="scan-line">
+          <div class="scan-item">${esc(i.name)}<div class="small muted">${esc(i.path)}</div></div>
+          <div class="scan-qty"><b>${num(i.quantity)}</b> ${esc(i.unit || '')}</div>
+          <button class="btn" data-take="${i.product_id}">Выдать</button>
+        </div>`).join('')}
+      ${details.instances.map((i) => `
+        <div class="scan-line">
+          <div class="scan-item">${esc(i.product_name)} <span class="code-chip">${esc(i.code)}</span></div>
+          <div class="scan-qty"><b>1</b> шт</div>
+          <button class="btn" data-take-inst="${i.id}">Выдать</button>
+        </div>`).join('')}` : `<p class="muted small">${isShelf ? 'На самой полке ничего не лежит.' : 'Коробка пустая.'}</p>`}
+    ${isShelf ? `
+      <div class="detail-title">Коробки на полке${boxes.length ? ` · ${boxes.length}` : ''}</div>
+      ${boxes.length ? `<div class="shelf-boxes">${boxes.map((b) => placeRow(b, 'box-row')).join('')}</div>`
+        : '<p class="muted small">Коробок пока нет.</p>'}` : ''}`;
+
+  const on = (act, handler) => {
+    const button = container.querySelector(`:scope > .detail-actions [data-act="${act}"]`);
+    if (button) button.addEventListener('click', handler);
+  };
+  on('put', () => putHereForm(loc));
+  on('add-box', () => locationForm('box', null, loc.id));
+  on('edit', () => locationForm(loc.kind, state.locations.find((l) => l.id === loc.id) || loc));
+  on('delete', () => deleteLocationForm(loc));
+  container.querySelectorAll(':scope > .scan-line [data-take]').forEach((b) => b.addEventListener('click', () => {
+    const item = items.find((i) => String(i.product_id) === b.dataset.take);
+    issueForm({
+      product_id: item.product_id, name: item.name, unit: item.unit, total: item.quantity, serialized: false,
+      places: [{ location_id: loc.id, code: loc.code, name: loc.name, quantity: item.quantity }],
+    }, loc.id);
+  }));
+  container.querySelectorAll(':scope > .scan-line [data-take-inst]').forEach((b) => b.addEventListener('click', () => {
+    issueInstanceForm(details.instances.find((i) => String(i.id) === b.dataset.takeInst));
+  }));
+  bindPlaceToggles(container);
+  container.querySelectorAll('.place-detail:not([hidden])').forEach((detail) => renderPlaceDetail(detail, Number(detail.dataset.detail)));
 }
 
 /** Удаление места: пустое — сразу после подтверждения, с товаром — только после разгрузки. */
@@ -1534,6 +1611,7 @@ function deleteLocationForm(place) {
       return;
     }
     closeModal();
+    openPlaces.delete(place.id);
     await loadLocations();
     state.arg = null;
     if (window.location.hash !== '#/scan') history.replaceState(null, '', '#/scan');
@@ -1611,12 +1689,10 @@ function locationForm(kind, existing = null, presetParent = null) {
     closeModal();
     toast(existing ? 'Сохранено' : `Создано: ${result.location.code} — напечатайте для него QR`);
     await loadLocations();
-    if (state.view === 'scan') {
-      renderPlaces(el('places'));
-      showScanned(result.location.code, !existing);
-    } else {
-      await route();
-    }
+    // новую коробку показываем раскрытой на её полке — там же кнопка QR
+    if (result.location.parent_id) openPlaces.add(result.location.parent_id);
+    if (!existing) openPlaces.add(result.location.id);
+    await route();
   });
 }
 

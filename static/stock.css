@@ -426,3 +426,15 @@ button.gcard:hover { border-color: var(--accent); }
 }
 .kind-tag { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid var(--accent);
   border-radius: 4px; padding: 0 5px; margin-right: 6px; vertical-align: 1px; }
+
+/* раскрытая полка или коробка в списке мест */
+.place-detail {
+  margin: 8px 0 4px; padding: 10px 12px 12px; background: var(--bg);
+  border: 1px solid var(--border-soft); border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0;
+}
+.place-detail .place-detail { margin-left: 4px; }
+.detail-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.detail-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 12px 0 4px; }
+.place-detail .shelf-boxes { margin: 0; padding: 0; border: 0; }
+.place-detail .box-row { padding: 6px 0; border-top: 1px solid var(--border-soft); }
+.place-detail .box-row:first-child { border-top: 0; }
