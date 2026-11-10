@@ -45,7 +45,7 @@ def position_label(item: dict[str, Any], path: str = "") -> dict[str, str]:
 
 def location_label(location: dict[str, Any], categories: dict[int, str],
                    locations: dict[int, dict[str, Any]]) -> dict[str, str]:
-    kind = {"shelf": "Полка", "box": "Коробка", "zone": "Зона"}.get(location["kind"], "")
+    kind = {"shelf": "Полка", "box": "Коробка", "lot": "Место", "zone": "Зона"}.get(location["kind"], "")
     purpose = ", ".join(categories[c] for c in location.get("category_ids", []) if c in categories)
     parent = locations.get(location.get("parent_id"))
     where = f"{kind} на {parent['code']}" if parent is not None else kind
@@ -71,7 +71,7 @@ def render(labels: list[dict[str, str]]) -> str:
     cells = []
     for label in labels:
         code = label.get("code") or ""
-        big = " big" if label.get("kind") in {"shelf", "box"} else ""
+        big = " big" if label.get("kind") in {"shelf", "box", "lot"} else ""
         cells.append(
             f"""
       <div class="label{big}">

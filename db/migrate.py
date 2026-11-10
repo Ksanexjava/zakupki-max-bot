@@ -226,6 +226,33 @@ async def backfill_locations(session) -> None:
         log.info("Старые движения привязаны к зоне приёмки: %s", moved)
 
 
+async def normalize_shelf_purposes(session) -> None:
+    """Полка теперь целиком под раздел: подкатегории в её назначении меняем на их раздел."""
+    from db.models import Category, Location, LocationCategory
+
+    categories = {c.id: c for c in (await session.execute(select(Category))).scalars().all()}
+    shelves = {l.id for l in (await session.execute(select(Location).where(Location.kind == "shelf"))).scalars().all()}
+    links = (await session.execute(select(LocationCategory))).scalars().all()
+    existing = {(link.location_id, link.category_id) for link in links}
+    changed = 0
+    for link in links:
+        if link.location_id not in shelves:
+            continue
+        category = categories.get(link.category_id)
+        if category is None or category.parent_id is None:
+            continue
+        top = (link.location_id, category.parent_id)
+        if top in existing:
+            await session.delete(link)
+        else:
+            link.category_id = category.parent_id
+            existing.add(top)
+        changed += 1
+    if changed:
+        await session.commit()
+        log.info("Назначения полок переведены на разделы: %s", changed)
+
+
 async def backfill_links(session) -> None:
     """Вынимает ссылки, застрявшие в названиях позиций, в отдельное поле."""
     from db.models import Item, Request

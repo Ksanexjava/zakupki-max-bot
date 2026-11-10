@@ -48,6 +48,8 @@ function explain(error) {
   const data = error.data || {};
   if (data.error === 'not_enough') return `Столько нет: в этом месте ${num(data.available)}`;
   if (data.error === 'forbidden') return 'Нет прав на это действие';
+  if (data.error === 'bad_category') return 'Полке назначают раздел, коробке и месту на полке — подраздел';
+  if (data.error === 'bad_parent') return 'Место на полке должно стоять на полке';
   return 'Не получилось — проверьте данные';
 }
 
@@ -155,11 +157,23 @@ function categoryOptions(selected) {
     </optgroup>`).join('');
 }
 
-/** Подходит ли место под категорию товара: совпадает подкатегория или раздел. */
-function locationFits(location, categoryId) {
-  if (!categoryId || !location.category_ids.length) return false;
-  const parent = state.catParent[categoryId];
-  return location.category_ids.includes(categoryId) || (parent && location.category_ids.includes(parent));
+const KIND_TITLES = { shelf: 'Полка', box: 'Коробка', lot: 'Место на полке', zone: 'Зона' };
+const ON_SHELF = ['box', 'lot'];
+
+/** Насколько место подходит товару: 2 — коробка или место его подраздела, 1 — полка его раздела, 0 — нет.
+
+Полка целиком под раздел (Медицина), коробки и места на ней — под подразделы (Медицина → Расходники). */
+function locationFit(location, categoryId) {
+  if (!categoryId) return 0;
+  const top = state.catParent[categoryId] || categoryId;
+  if (ON_SHELF.includes(location.kind)) {
+    if (location.category_ids.includes(categoryId)) return 2;
+    if (location.category_ids.length) return 0;
+    // своего подраздела нет — смотрим на раздел полки, где стоит
+    const shelf = state.locations.find((l) => l.id === location.parent_id);
+    return shelf && shelf.category_ids.includes(top) ? 1 : 0;
+  }
+  return location.kind === 'shelf' && location.category_ids.includes(top) ? 1 : 0;
 }
 
 /** Где лежит — коротко: «в приёмке», «SH-01» или «SH-01 › BX-001» для коробки на полке. */
@@ -172,17 +186,19 @@ function whereText(locationId, code) {
 }
 
 function locationLabel(location) {
-  const kind = location.kind === 'box' ? 'коробка' : location.kind === 'zone' ? 'зона' : 'полка';
-  return `${location.code} · ${location.name} (${kind})`;
+  return `${whereText(location.id, location.code)} · ${location.name} (${KIND_TITLES[location.kind].toLowerCase()})`;
 }
 
 function locationOptions(categoryId, excludeId) {
   const usable = state.locations.filter((l) => l.kind !== 'zone' && l.id !== excludeId);
-  const fit = usable.filter((l) => locationFits(l, categoryId));
-  const rest = usable.filter((l) => !locationFits(l, categoryId));
+  const exact = usable.filter((l) => locationFit(l, categoryId) === 2);
+  const section = usable.filter((l) => locationFit(l, categoryId) === 1);
+  const rest = usable.filter((l) => locationFit(l, categoryId) === 0);
   const opt = (l) => `<option value="${l.id}">${esc(locationLabel(l))}</option>`;
-  return (fit.length ? `<optgroup label="Подходят по категории">${fit.map(opt).join('')}</optgroup>` : '')
-    + (rest.length ? `<optgroup label="${fit.length ? 'Остальные' : 'Места'}">${rest.map(opt).join('')}</optgroup>` : '');
+  const group = (label, rows) => (rows.length ? `<optgroup label="${label}">${rows.map(opt).join('')}</optgroup>` : '');
+  return group('Коробки и места этого подраздела', exact)
+    + group('Полки этого раздела', section)
+    + group(exact.length || section.length ? 'Остальные места' : 'Места', rest);
 }
 
 /** Список «кому выдать»: сотрудники по отделениям. */
@@ -395,7 +411,7 @@ function pickLocationByScan() {
     bindScanner('pick', async (text) => {
       try {
         const found = await api(`/api/stock/resolve?code=${encodeURIComponent(text)}`);
-        if (!['shelf', 'box'].includes(found.type)) { toast('Это не полка и не коробка'); return; }
+        if (!['shelf', 'box', 'lot'].includes(found.type)) { toast('Это не полка, не коробка и не место'); return; }
         const location = state.locations.find((l) => l.id === found.id);
         closePickScanner(location || null);
       } catch (e) {
@@ -1198,9 +1214,11 @@ async function viewScan(root) {
       <h2>Места хранения</h2>
       <button class="btn" id="m-print" disabled>QR на выбранные</button>
       <button class="btn" id="m-add-box">+ Коробка</button>
+      <button class="btn" id="m-add-lot">+ Место на полке</button>
       <button class="btn btn-primary" id="m-add-shelf">+ Полка</button>
     </div>
-    <p class="view-hint">У каждой полки и коробки свой QR. Назначьте месту категорию — при раскладке оно будет предлагаться первым.</p>
+    <p class="view-hint">Полка — целиком под раздел (Медицина). На ней коробки для мелочи и места для товара без коробки —
+      каждое под свой подраздел (Медицина → Расходники) и со своим QR. При раскладке они предлагаются первыми.</p>
     <div id="places"></div>`;
   bindScanner('main', (text) => showScanned(text));
   renderPlaces(el('places'));
@@ -1221,10 +1239,16 @@ async function showScanned(text, scroll = false) {
   // адрес с кодом: после обновления страницы карточка откроется снова
   state.arg = found.code;
   history.replaceState(null, '', `#/scan/${encodeURIComponent(found.code)}`);
-  if (found.type === 'shelf' || found.type === 'box' || found.type === 'zone') renderLocationCard(box, found.details);
+  if (['shelf', 'box', 'lot', 'zone'].includes(found.type)) renderLocationCard(box, found.details);
   else if (found.type === 'instance') renderInstanceCard(box, found.details);
   else if (found.type === 'position') renderPositionCard(box, found.details);
   if (scroll) box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+/** Назначение места по общему списку: «Медицина» у полки, «Медицина → Расходники» у коробки. */
+function purposeOf(locationId) {
+  const location = state.locations.find((l) => l.id === locationId);
+  return location ? location.category_ids.map((id) => state.catPath[id]).filter(Boolean).join(', ') : '';
 }
 
 function placeCounts(location) {
@@ -1237,7 +1261,7 @@ function placeCounts(location) {
 
 function renderLocationCard(box, details) {
   const loc = details.location;
-  const kind = loc.kind === 'box' ? 'Коробка' : loc.kind === 'zone' ? 'Зона' : 'Полка';
+  const kind = KIND_TITLES[loc.kind] || 'Место';
   const purpose = loc.category_ids.map((id) => state.catPath[id]).filter(Boolean).join(', ');
   // назначение не задано — подсказываем по тому, что лежит на самом деле
   const actual = [...new Set([
@@ -1263,8 +1287,9 @@ function renderLocationCard(box, details) {
           </div>` : ''}
       </div>
       <div class="purpose">${purpose
-        ? `Категория: <b>${esc(purpose)}</b>`
-        : actual.length ? `По содержимому: ${esc(actual.join(', '))}` : 'Категория не задана'}</div>
+        ? `${loc.kind === 'shelf' ? 'Раздел' : 'Подраздел'}: <b>${esc(purpose)}</b>`
+        : actual.length ? `По содержимому: ${esc(actual.join(', '))}`
+        : loc.kind === 'shelf' ? 'Раздел не задан' : 'Подраздел не задан'}</div>
       <div class="scan-contents">
         ${items.map((i) => `
           <div class="scan-line">
@@ -1280,12 +1305,18 @@ function renderLocationCard(box, details) {
           </div>`).join('')}
         ${details.boxes.map((b) => `
           <div class="scan-line">
-            <div class="scan-item">Коробка «${esc(b.name)}» <span class="code-chip">${esc(b.code)}</span></div>
+            <div class="scan-item">${b.kind === 'lot' ? 'Место' : 'Коробка'} «${esc(b.name)}» <span class="code-chip">${esc(b.code)}</span>
+              ${purposeOf(b.id) ? `<div class="small muted">${esc(purposeOf(b.id))}</div>` : ''}</div>
             <div class="scan-qty muted">${esc(placeCounts(state.locations.find((l) => l.id === b.id)))}</div>
             <button class="btn" data-open="${esc(b.code)}">Открыть</button>
           </div>`).join('')}
         ${empty ? '<p class="muted">Здесь пока ничего нет.</p>' : ''}
       </div>
+      ${loc.kind === 'shelf' ? `
+        <div class="row-actions" style="margin-top:12px">
+          <button class="btn" id="s-add-box">+ Коробка на эту полку</button>
+          <button class="btn" id="s-add-lot">+ Место на этой полке</button>
+        </div>` : ''}
       ${loc.kind !== 'zone' ? '<button class="btn btn-primary btn-lg btn-block" id="s-put" style="margin-top:14px">Положить сюда из приёмки</button>' : ''}
     </div>`;
 
@@ -1293,6 +1324,8 @@ function renderLocationCard(box, details) {
   if (put) put.addEventListener('click', () => putHereForm(loc));
   const edit = el('s-edit');
   if (edit) edit.addEventListener('click', () => locationForm(loc.kind, loc));
+  if (el('s-add-box')) el('s-add-box').addEventListener('click', () => locationForm('box', null, loc.id));
+  if (el('s-add-lot')) el('s-add-lot').addEventListener('click', () => locationForm('lot', null, loc.id));
   box.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => showScanned(b.dataset.open)));
   box.querySelectorAll('[data-take]').forEach((b) => b.addEventListener('click', () => {
     const item = details.items.find((i) => String(i.product_id) === b.dataset.take);
@@ -1421,17 +1454,16 @@ function renderPositionCard(box, item) {
 
 /* =============================================================== места */
 
-/** Список полок с коробками под сканером. */
+/** Список полок с их коробками и местами — под сканером. */
 function renderPlaces(root) {
   const shelves = state.locations.filter((l) => l.kind === 'shelf');
-  const boxes = state.locations.filter((l) => l.kind === 'box');
-  const purpose = (l) => l.category_ids.map((id) => state.catPath[id]).filter(Boolean).join(', ');
+  const children = state.locations.filter((l) => ON_SHELF.includes(l.kind));
   const row = (l, cls) => `
     <div class="${cls}">
       <input type="checkbox" class="check" data-sel="${l.id}" aria-label="Выбрать ${esc(l.code)}">
       <span class="code-chip">${esc(l.code)}</span>
-      <span class="place-name">${esc(l.name)}
-        <span class="small muted">${esc(placeCounts(l))}${purpose(l) ? ` · ${esc(purpose(l))}` : ''}</span></span>
+      <span class="place-name">${l.kind === 'lot' ? '<span class="kind-tag">место</span>' : ''}${esc(l.name)}
+        <span class="small muted">${esc(placeCounts(l))}${purposeOf(l.id) ? ` · ${esc(purposeOf(l.id))}` : ''}</span></span>
       <button class="btn" data-open="${esc(l.code)}">Открыть</button>
     </div>`;
 
@@ -1440,16 +1472,16 @@ function renderPlaces(root) {
       ${shelves.map((s) => `
         <div class="shelf-card">
           ${row(s, 'shelf-head')}
-          ${boxes.some((b) => b.parent_id === s.id) ? `
-            <div class="shelf-boxes">${boxes.filter((b) => b.parent_id === s.id).map((b) => row(b, 'box-row')).join('')}</div>` : ''}
+          ${children.some((c) => c.parent_id === s.id) ? `
+            <div class="shelf-boxes">${children.filter((c) => c.parent_id === s.id).map((c) => row(c, 'box-row')).join('')}</div>` : ''}
         </div>`).join('')}
-      ${boxes.some((b) => !b.parent_id) ? `
+      ${children.some((c) => !c.parent_id) ? `
         <div class="shelf-card">
           <div class="small muted" style="margin-bottom:6px">Коробки не на полке</div>
-          ${boxes.filter((b) => !b.parent_id).map((b) => row(b, 'box-row')).join('')}
+          ${children.filter((c) => !c.parent_id).map((c) => row(c, 'box-row')).join('')}
         </div>` : ''}
     </div>
-    ${shelves.length || boxes.length ? '' : '<p class="empty">Мест пока нет. Начните с полок: «+ Полка».</p>'}`;
+    ${shelves.length || children.length ? '' : '<p class="empty">Мест пока нет. Начните с полок: «+ Полка».</p>'}`;
 
   const selected = () => [...root.querySelectorAll('[data-sel]:checked')].map((c) => c.dataset.sel);
   root.querySelectorAll('[data-sel]').forEach((c) => c.addEventListener('change', () => {
@@ -1460,42 +1492,77 @@ function renderPlaces(root) {
   });
   el('m-add-shelf').addEventListener('click', () => locationForm('shelf'));
   el('m-add-box').addEventListener('click', () => locationForm('box'));
+  el('m-add-lot').addEventListener('click', () => locationForm('lot'));
   root.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => showScanned(b.dataset.open, true)));
 }
 
-function locationForm(kind, existing = null) {
+/** Полка — под раздел; коробка и место на полке — под подраздел раздела своей полки. */
+function locationForm(kind, existing = null, presetParent = null) {
   const shelves = state.locations.filter((l) => l.kind === 'shelf');
-  const chosen = existing ? existing.category_ids : [];
-  openModal(existing ? `Изменить ${existing.code}` : (kind === 'shelf' ? 'Новая полка' : 'Новая коробка'), `
-    <div class="form-row"><label>Название</label>
-      <input type="text" id="f-name" value="${esc(existing ? existing.name : '')}"
-        placeholder="${kind === 'shelf' ? 'например: Стеллаж 2, полка 3' : 'например: Салфетки для обработки'}"></div>
-    ${kind === 'box' ? `<div class="form-row"><label>На какой полке стоит</label>
-      <select id="f-parent"><option value="">— не на полке —</option>
-        ${shelves.map((s) => `<option value="${s.id}" ${existing && existing.parent_id === s.id ? 'selected' : ''}>${esc(s.code)} · ${esc(s.name)}</option>`).join('')}
+  const chosen = existing && existing.category_ids.length ? existing.category_ids[0] : null;
+  const parentId = existing ? existing.parent_id : presetParent;
+  const titles = { shelf: 'Новая полка', box: 'Новая коробка', lot: 'Новое место на полке' };
+  const hints = {
+    shelf: 'например: Стеллаж 2, полка 3',
+    box: 'например: Салфетки для обработки',
+    lot: 'например: Кровати, левый край',
+  };
+  openModal(existing ? `Изменить ${existing.code}` : titles[kind], `
+    ${kind === 'lot' && !existing ? '<p class="muted small" style="margin:0 0 12px">Место на полке — участок полки со своим QR для товара без коробки, например под крупный товар.</p>' : ''}
+    ${kind !== 'shelf' ? `<div class="form-row"><label>На какой полке</label>
+      <select id="f-parent">
+        <option value="">${kind === 'box' ? '— не на полке —' : '— выберите полку —'}</option>
+        ${shelves.map((s) => `<option value="${s.id}" ${s.id === parentId ? 'selected' : ''}>${esc(s.code)} · ${esc(s.name)}${purposeOf(s.id) ? ` (${esc(purposeOf(s.id))})` : ''}</option>`).join('')}
       </select></div>` : ''}
-    <div class="form-row"><label>Что здесь хранится (можно несколько — Ctrl/Cmd + клик)</label>
-      <select id="f-cats" multiple>
-        ${state.categories.map((top) => `
-          <optgroup label="${esc(top.name)}">
-            <option value="${top.id}" ${chosen.includes(top.id) ? 'selected' : ''}>${esc(top.name)} — весь раздел</option>
-            ${top.children.map((c) => `<option value="${c.id}" ${chosen.includes(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
-          </optgroup>`).join('')}
-      </select></div>
+    <div class="form-row"><label>${kind === 'shelf' ? 'Раздел' : 'Подраздел'}</label>
+      <select id="f-cat"></select>
+      <div class="auto-tag">${kind === 'shelf'
+        ? 'Вся полка под этот раздел; коробки и места на ней получат его подразделы'
+        : 'Показаны подразделы раздела выбранной полки'}</div></div>
+    <div class="form-row"><label>Название</label>
+      <input type="text" id="f-name" value="${esc(existing ? existing.name : '')}" placeholder="${hints[kind]}"></div>
     <button class="btn btn-primary btn-lg btn-block" id="f-ok">${existing ? 'Сохранить' : 'Создать'}</button>`);
+
+  const fillCategories = () => {
+    if (kind === 'shelf') {
+      el('f-cat').innerHTML = '<option value="">— без раздела —</option>' + state.categories.map((top) =>
+        `<option value="${top.id}" ${top.id === chosen ? 'selected' : ''}>${esc(top.name)}</option>`).join('');
+      return;
+    }
+    const shelf = shelves.find((s) => String(s.id) === el('f-parent').value);
+    const tops = shelf && shelf.category_ids.length
+      ? state.categories.filter((top) => shelf.category_ids.includes(top.id))
+      : state.categories;
+    const current = el('f-cat').value ? Number(el('f-cat').value) : chosen;
+    el('f-cat').innerHTML = '<option value="">— без подраздела —</option>' + tops.map((top) => `
+      <optgroup label="${esc(top.name)}">${top.children.map((c) =>
+        `<option value="${c.id}" ${c.id === current ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</optgroup>`).join('');
+  };
+  fillCategories();
+  if (kind !== 'shelf') el('f-parent').addEventListener('change', fillCategories);
+  // пустое название подставляем из раздела или подраздела — потом можно поправить
+  el('f-cat').addEventListener('change', () => {
+    const option = el('f-cat').selectedOptions[0];
+    if (!el('f-name').value.trim() && el('f-cat').value && option) el('f-name').value = option.textContent;
+  });
 
   el('f-ok').addEventListener('click', async () => {
     const name = el('f-name').value.trim();
     if (!name) { toast('Введите название'); return; }
-    const payload = {
-      kind,
-      name,
-      category_ids: [...el('f-cats').selectedOptions].map((o) => Number(o.value)),
-    };
-    if (kind === 'box') payload.parent_id = el('f-parent').value ? Number(el('f-parent').value) : null;
-    const result = existing
-      ? await post(`/api/stock/locations/${existing.id}`, payload)
-      : await post('/api/stock/locations', payload);
+    const payload = { kind, name, category_ids: el('f-cat').value ? [Number(el('f-cat').value)] : [] };
+    if (kind !== 'shelf') {
+      payload.parent_id = el('f-parent').value ? Number(el('f-parent').value) : null;
+      if (kind === 'lot' && !payload.parent_id) { toast('Выберите полку'); return; }
+    }
+    let result;
+    try {
+      result = existing
+        ? await post(`/api/stock/locations/${existing.id}`, payload)
+        : await post('/api/stock/locations', payload);
+    } catch (error) {
+      toast(explain(error));
+      return;
+    }
     closeModal();
     toast(existing ? 'Сохранено' : `Создано: ${result.location.code} — напечатайте для него QR`);
     await loadLocations();

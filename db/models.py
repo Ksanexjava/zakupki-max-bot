@@ -281,12 +281,13 @@ class Location(Base):
     __tablename__ = "locations"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    #: shelf — полка, box — коробка, zone — служебная зона (приёмка)
+    #: shelf — полка (под раздел), box — коробка и lot — место на полке (под подраздел),
+    #: zone — служебная зона (приёмка)
     kind: Mapped[str] = mapped_column(String(10), default="shelf")
-    #: код на наклейке: SH-01, BX-001
+    #: код на наклейке: SH-01, BX-001, LT-001
     code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(200), default="")
-    #: коробка стоит на полке
+    #: коробка или место стоит на полке
     parent_id: Mapped[int | None] = mapped_column(
         ForeignKey("locations.id", ondelete="SET NULL"), default=None, index=True
     )

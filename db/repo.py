@@ -964,6 +964,35 @@ def location_to_dict(location: Location, category_ids: list[int] | None = None) 
     }
 
 
+#: виды мест: полка под раздел; коробка и место на полке — под подраздел
+LOCATION_KINDS = {"shelf": ("SH", 2), "box": ("BX", 3), "lot": ("LT", 3)}
+ON_SHELF = {"box", "lot"}
+
+
+async def _check_place(session: AsyncSession, kind: str, parent_id: int | None,
+                       category_ids: list[int] | None) -> list[int]:
+    """Полке назначают только разделы, коробке и месту на полке — только подразделы.
+
+    Место на полке без полки не бывает; коробка может стоять и отдельно.
+    """
+    if kind == "lot" and not parent_id:
+        raise ValueError("parent")
+    if parent_id:
+        parent = await session.get(Location, parent_id)
+        if parent is None or parent.kind != "shelf":
+            raise ValueError("parent")
+    ids = [int(c) for c in category_ids or []]
+    for category_id in ids:
+        category = await session.get(Category, category_id)
+        if category is None:
+            raise ValueError("category")
+        if kind == "shelf" and category.parent_id is not None:
+            raise ValueError("category")
+        if kind in ON_SHELF and category.parent_id is None:
+            raise ValueError("category")
+    return ids
+
+
 async def create_location(
     kind: str,
     name: str,
@@ -971,25 +1000,27 @@ async def create_location(
     category_ids: list[int] | None = None,
     note: str = "",
 ) -> dict[str, Any]:
-    """Новая полка (SH-01) или коробка (BX-001) с назначением по категориям."""
-    if kind not in {"shelf", "box"}:
+    """Новая полка (SH-01), коробка (BX-001) или место на полке (LT-001)."""
+    if kind not in LOCATION_KINDS:
         raise ValueError("kind")
     async with Session() as session:
-        prefix, width = ("SH", 2) if kind == "shelf" else ("BX", 3)
+        parent_id = parent_id if kind in ON_SHELF else None
+        ids = await _check_place(session, kind, parent_id, category_ids)
+        prefix, width = LOCATION_KINDS[kind]
         location = Location(
             kind=kind,
             code=await _next_code(session, prefix, width, Location, Location.code),
             name=name.strip(),
-            parent_id=parent_id if kind == "box" else None,
+            parent_id=parent_id,
             note=note.strip(),
         )
         session.add(location)
         await session.flush()
-        for category_id in category_ids or []:
-            session.add(LocationCategory(location_id=location.id, category_id=int(category_id)))
+        for category_id in ids:
+            session.add(LocationCategory(location_id=location.id, category_id=category_id))
         await session.commit()
         await session.refresh(location)
-        return location_to_dict(location, list(category_ids or []))
+        return location_to_dict(location, ids)
 
 
 async def update_location(
@@ -1000,24 +1031,28 @@ async def update_location(
     note: str | None = None,
     active: bool | None = None,
 ) -> dict[str, Any] | None:
+    """parent_id: None — не трогать, 0 — снять с полки."""
     async with Session() as session:
         location = await session.get(Location, location_id)
         if location is None or location.kind == "zone":
             return None
+        new_parent = location.parent_id
+        if location.kind in ON_SHELF and parent_id is not None:
+            new_parent = parent_id or None
+        ids = await _check_place(session, location.kind, new_parent, category_ids)
         if name is not None:
             location.name = name.strip()
         if note is not None:
             location.note = note.strip()
         if active is not None:
             location.active = active
-        if location.kind == "box" and parent_id is not None:
-            location.parent_id = parent_id or None
+        location.parent_id = new_parent
         if category_ids is not None:
             await session.execute(
                 LocationCategory.__table__.delete().where(LocationCategory.location_id == location_id)
             )
-            for category_id in category_ids:
-                session.add(LocationCategory(location_id=location_id, category_id=int(category_id)))
+            for category_id in ids:
+                session.add(LocationCategory(location_id=location_id, category_id=category_id))
         await session.commit()
         await session.refresh(location)
         links = (
@@ -1069,7 +1104,8 @@ async def list_locations() -> list[dict[str, Any]]:
     instance_counts = {location_id: count for location_id, count in instances}
 
     rows = []
-    for location in sorted(locations, key=lambda l: ({"zone": 0, "shelf": 1, "box": 2}[l.kind], l.code)):
+    order = {"zone": 0, "shelf": 1, "box": 2, "lot": 3}
+    for location in sorted(locations, key=lambda l: (order.get(l.kind, 9), l.code)):
         data = location_to_dict(location, cats_by_location.get(location.id, []))
         data["products"] = products_by_location.get(location.id, 0)
         data["instances"] = instance_counts.get(location.id, 0)

@@ -45,6 +45,7 @@ async def init_db() -> None:
         await migrate.backfill_links(session)
         await migrate.backfill(session)
         await migrate.backfill_locations(session)
+        await migrate.normalize_shelf_purposes(session)
     await seed_employees()
     from db import repo  # локальный импорт: repo импортирует session
     await repo.classify_unassigned_products()

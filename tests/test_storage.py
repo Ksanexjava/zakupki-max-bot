@@ -109,34 +109,89 @@ def test_shelves_boxes_and_purposes():
         client = await _client()
         try:
             await _login(client, STOCK_LOGIN, STOCK_PASS)
+            medicine = await _category_id("Медицина")
             consumables = await _category_id("Медицина", "Расходники")
+            furniture = await _category_id("Медицина", "Медицинская мебель")
+
+            # полка — целиком под раздел; подраздел ей назначить нельзя
             response = await client.post("/api/stock/locations", json={
-                "kind": "shelf", "name": "Полка для расходников", "category_ids": [consumables],
+                "kind": "shelf", "name": "Полка медицины", "category_ids": [consumables],
+            })
+            assert (response.status, (await response.json())["error"]) == (400, "bad_category")
+            response = await client.post("/api/stock/locations", json={
+                "kind": "shelf", "name": "Полка медицины", "category_ids": [medicine],
             })
             shelf = (await response.json())["location"]
-            assert shelf["code"].startswith("SH-")
-            assert shelf["category_ids"] == [consumables]
+            assert shelf["code"].startswith("SH-") and shelf["category_ids"] == [medicine]
 
+            # коробка и место на полке — под подраздел
             response = await client.post("/api/stock/locations", json={
-                "kind": "box", "name": "Салфетки", "parent_id": shelf["id"],
+                "kind": "box", "name": "Салфетки", "parent_id": shelf["id"], "category_ids": [medicine],
+            })
+            assert (await response.json())["error"] == "bad_category"
+            response = await client.post("/api/stock/locations", json={
+                "kind": "box", "name": "Салфетки", "parent_id": shelf["id"], "category_ids": [consumables],
             })
             box = (await response.json())["location"]
-            assert box["code"].startswith("BX-")
-            assert box["parent_id"] == shelf["id"]
+            assert box["code"].startswith("BX-") and box["parent_id"] == shelf["id"]
+
+            response = await client.post("/api/stock/locations", json={
+                "kind": "lot", "name": "Место под кровати", "parent_id": shelf["id"], "category_ids": [furniture],
+            })
+            lot = (await response.json())["location"]
+            assert lot["code"].startswith("LT-") and lot["parent_id"] == shelf["id"]
+
+            # место на полке без полки не бывает, и родителем может быть только полка
+            response = await client.post("/api/stock/locations", json={"kind": "lot", "name": "Без полки"})
+            assert (await response.json())["error"] == "bad_parent"
+            response = await client.post("/api/stock/locations", json={
+                "kind": "lot", "name": "В коробке", "parent_id": box["id"],
+            })
+            assert (await response.json())["error"] == "bad_parent"
+
+            found = await (await client.get("/api/stock/resolve", params={"code": lot["code"]})).json()
+            assert found["type"] == "lot" and found["details"]["location"]["id"] == lot["id"]
+            contents = await (await client.get(f"/api/stock/locations/{shelf['id']}")).json()
+            assert {b["code"] for b in contents["boxes"]} == {box["code"], lot["code"]}
 
             # переименовали, не трогая назначение — категории остаются
             response = await client.post(f"/api/stock/locations/{shelf['id']}", json={"name": "Стеллаж 1"})
-            assert (await response.json())["location"]["category_ids"] == [consumables]
-
-            # коробку сняли с полки
+            assert (await response.json())["location"]["category_ids"] == [medicine]
+            # коробку сняли с полки, а место на полке снять нельзя
             response = await client.post(f"/api/stock/locations/{box['id']}", json={"parent_id": None})
             assert (await response.json())["location"]["parent_id"] is None
+            response = await client.post(f"/api/stock/locations/{lot['id']}", json={"parent_id": None})
+            assert response.status == 400
 
-            # пустое название и чужой тип не принимаются
             assert (await client.post("/api/stock/locations", json={"kind": "shelf", "name": " "})).status == 400
             assert (await client.post("/api/stock/locations", json={"kind": "zone", "name": "X"})).status == 400
         finally:
             await client.close()
+
+    run(scenario())
+
+
+def test_old_shelf_purposes_move_to_sections():
+    async def scenario():
+        from db import migrate
+        from db.models import LocationCategory
+        from db.session import Session
+        from sqlalchemy import select
+
+        await _client()
+        medicine = await _category_id("Медицина")
+        consumables = await _category_id("Медицина", "Расходники")
+        furniture = await _category_id("Медицина", "Медицинская мебель")
+        shelf = await repo.create_location("shelf", "Старая полка")
+        async with Session() as session:      # как было до обновления: полка с подразделами
+            session.add(LocationCategory(location_id=shelf["id"], category_id=consumables))
+            session.add(LocationCategory(location_id=shelf["id"], category_id=furniture))
+            await session.commit()
+            await migrate.normalize_shelf_purposes(session)
+            links = (await session.execute(
+                select(LocationCategory).where(LocationCategory.location_id == shelf["id"])
+            )).scalars().all()
+        assert [link.category_id for link in links] == [medicine]
 
     run(scenario())
 
@@ -277,9 +332,10 @@ def test_labels_for_shelves_boxes_and_instances():
         client = await _client()
         try:
             await _login(client, STOCK_LOGIN, STOCK_PASS)
+            medicine = await _category_id("Медицина")
             consumables = await _category_id("Медицина", "Расходники")
-            shelf = await repo.create_location("shelf", "Полка наклеек", category_ids=[consumables])
-            box = await repo.create_location("box", "Коробка наклеек", parent_id=shelf["id"])
+            shelf = await repo.create_location("shelf", "Полка наклеек", category_ids=[medicine])
+            box = await repo.create_location("box", "Коробка наклеек", parent_id=shelf["id"], category_ids=[consumables])
             created = await _ordered_request(items=[{"name": "Кровать функциональная (наклейка)", "quantity": "1 шт"}])
             received = await _receive_all(client, created.id)
             instance_code = received["Кровать функциональная (наклейка)"]["instances_created"][0]

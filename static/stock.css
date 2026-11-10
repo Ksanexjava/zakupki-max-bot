@@ -255,7 +255,8 @@ details[open] > .cat-head::before, details[open] > .sub-head::before { transform
 .scan-qty b { font-size: 17px; }
 .small { font-size: 12px; }
 .link-btn { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; }
-.place-name { flex: 1; min-width: 140px; display: flex; flex-direction: column; }
+.place-name { flex: 1; min-width: 140px; }
+.place-name .small { display: block; }
 
 @media (max-width: 720px) {
   .dash-stats { gap: 6px; }
@@ -423,3 +424,5 @@ button.gcard:hover { border-color: var(--accent); }
   .multi-qty { width: 100%; }
   .multi-qty input { flex: 1; }
 }
+.kind-tag { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid var(--accent);
+  border-radius: 4px; padding: 0 5px; margin-right: 6px; vertical-align: 1px; }

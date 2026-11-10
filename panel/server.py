@@ -623,29 +623,35 @@ async def handle_location_create(request: web.Request) -> web.StreamResponse:
     payload = await _json(request)
     kind = str(payload.get("kind", "shelf"))
     name = str(payload.get("name", "")).strip()
-    if kind not in {"shelf", "box"} or not name:
+    if kind not in repo.LOCATION_KINDS or not name:
         return web.json_response({"error": "bad_request"}, status=400)
-    location = await repo.create_location(
-        kind,
-        name,
-        parent_id=int(payload["parent_id"]) if payload.get("parent_id") else None,
-        category_ids=[int(c) for c in payload.get("category_ids", [])],
-        note=str(payload.get("note", "")),
-    )
+    try:
+        location = await repo.create_location(
+            kind,
+            name,
+            parent_id=int(payload["parent_id"]) if payload.get("parent_id") else None,
+            category_ids=[int(c) for c in payload.get("category_ids", [])],
+            note=str(payload.get("note", "")),
+        )
+    except ValueError as error:
+        return web.json_response({"error": f"bad_{error}"}, status=400)
     return web.json_response({"ok": True, "location": location})
 
 
 async def handle_location_update(request: web.Request) -> web.StreamResponse:
     payload = await _json(request)
-    location = await repo.update_location(
-        int(request.match_info["location_id"]),
-        name=payload.get("name"),
-        # 0 — «снять коробку с полки», None — не трогать
-        parent_id=int(payload["parent_id"] or 0) if "parent_id" in payload else None,
-        category_ids=[int(c) for c in payload["category_ids"]] if "category_ids" in payload else None,
-        note=payload.get("note"),
-        active=payload.get("active"),
-    )
+    try:
+        location = await repo.update_location(
+            int(request.match_info["location_id"]),
+            name=payload.get("name"),
+            # 0 — «снять коробку с полки», None — не трогать
+            parent_id=int(payload["parent_id"] or 0) if "parent_id" in payload else None,
+            category_ids=[int(c) for c in payload["category_ids"]] if "category_ids" in payload else None,
+            note=payload.get("note"),
+            active=payload.get("active"),
+        )
+    except ValueError as error:
+        return web.json_response({"error": f"bad_{error}"}, status=400)
     if location is None:
         return web.json_response({"error": "not_found"}, status=404)
     return web.json_response({"ok": True, "location": location})
@@ -706,7 +712,7 @@ async def handle_resolve(request: web.Request) -> web.StreamResponse:
     found = await repo.resolve_code(request.query.get("code", ""))
     if found is None:
         return web.json_response({"error": "not_found"}, status=404)
-    if found["type"] in {"shelf", "box", "zone"}:
+    if found["type"] in {"shelf", "box", "lot", "zone"}:
         found["details"] = await repo.location_contents(found["id"])
     elif found["type"] == "instance":
         found["details"] = await repo.get_instance(found["id"])
@@ -849,7 +855,7 @@ async def handle_labels(request: web.Request) -> web.StreamResponse:
             continue
         if found["type"] == "instance":
             instance_ids.append(found["id"])
-        elif found["type"] in {"shelf", "box"}:
+        elif found["type"] in {"shelf", "box", "lot"}:
             location_ids.append(found["id"])
         elif found["type"] == "position":
             item = await repo.find_item_by_id(found["id"])
