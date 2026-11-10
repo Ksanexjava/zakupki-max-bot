@@ -1284,6 +1284,7 @@ function renderLocationCard(box, details) {
           <div class="scan-tools">
             <a class="btn" href="${labelsUrl([loc.code])}" target="_blank" rel="noopener">QR</a>
             <button class="btn" id="s-edit">Изменить</button>
+            <button class="btn btn-danger" id="s-delete">Удалить</button>
           </div>` : ''}
       </div>
       <div class="purpose">${purpose
@@ -1324,6 +1325,7 @@ function renderLocationCard(box, details) {
   if (put) put.addEventListener('click', () => putHereForm(loc));
   const edit = el('s-edit');
   if (edit) edit.addEventListener('click', () => locationForm(loc.kind, loc));
+  if (el('s-delete')) el('s-delete').addEventListener('click', () => deleteLocationForm(loc));
   if (el('s-add-box')) el('s-add-box').addEventListener('click', () => locationForm('box', null, loc.id));
   if (el('s-add-lot')) el('s-add-lot').addEventListener('click', () => locationForm('lot', null, loc.id));
   box.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => showScanned(b.dataset.open)));
@@ -1494,6 +1496,49 @@ function renderPlaces(root) {
   el('m-add-box').addEventListener('click', () => locationForm('box'));
   el('m-add-lot').addEventListener('click', () => locationForm('lot'));
   root.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => showScanned(b.dataset.open, true)));
+}
+
+/** Удаление места: пустое — сразу после подтверждения, с товаром — только после разгрузки. */
+function deleteLocationForm(place) {
+  const children = state.locations.filter((l) => l.parent_id === place.id);
+  const all = [state.locations.find((l) => l.id === place.id) || place, ...children];
+  const busy = all.filter((l) => l.products || l.instances);
+  const list = (rows) => rows.map((l) => `<span class="code-chip">${esc(l.code)}</span> ${esc(l.name)}`).join(', ');
+  if (busy.length) {
+    openModal(`Удалить ${place.code} нельзя`, `
+      <p style="margin:0 0 10px">Внутри лежит товар: ${list(busy)}.</p>
+      <p class="muted" style="margin:0 0 14px">Переложите его в другое место или выдайте — потом место можно будет удалить.</p>
+      <button class="btn btn-lg btn-block" id="d-cancel">Понятно</button>`);
+    el('d-cancel').addEventListener('click', closeModal);
+    return;
+  }
+  openModal(`Удалить ${place.code}?`, `
+    <p style="margin:0 0 10px">${esc(KIND_TITLES[place.kind])} «${esc(place.name)}» пропадёт из списков и сканера,
+      но останется в истории операций.</p>
+    ${children.length ? `<p style="margin:0 0 10px">Вместе с полкой удалятся: ${list(children)}.</p>` : ''}
+    <p class="muted small" style="margin:0 0 14px">Наклейку можно снять: код ${esc(place.code)} больше никому не достанется.</p>
+    <div class="row-actions">
+      <button class="btn btn-lg" id="d-cancel">Отмена</button>
+      <button class="btn btn-danger btn-lg" id="d-ok">Удалить</button>
+    </div>`);
+  el('d-cancel').addEventListener('click', closeModal);
+  el('d-ok').addEventListener('click', async () => {
+    try {
+      const result = await api(`/api/stock/locations/${place.id}`, { method: 'DELETE' });
+      toast(`Удалено: ${result.deleted.join(', ')}`);
+    } catch (error) {
+      const data = error.data || {};
+      toast(data.error === 'not_empty'
+        ? 'Внутри появился товар — сначала переложите или выдайте его'
+        : 'Не получилось удалить');
+      return;
+    }
+    closeModal();
+    await loadLocations();
+    state.arg = null;
+    if (window.location.hash !== '#/scan') history.replaceState(null, '', '#/scan');
+    await route();
+  });
 }
 
 /** Полка — под раздел; коробка и место на полке — под подраздел раздела своей полки. */

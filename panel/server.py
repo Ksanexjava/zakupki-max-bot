@@ -657,6 +657,12 @@ async def handle_location_update(request: web.Request) -> web.StreamResponse:
     return web.json_response({"ok": True, "location": location})
 
 
+async def handle_location_delete(request: web.Request) -> web.StreamResponse:
+    result = await repo.delete_location(int(request.match_info["location_id"]))
+    status = 200 if result["ok"] else 404 if result["error"] == "not_found" else 409
+    return web.json_response(result, status=status)
+
+
 async def handle_location_contents(request: web.Request) -> web.StreamResponse:
     contents = await repo.location_contents(int(request.match_info["location_id"]))
     if contents is None:
@@ -924,6 +930,7 @@ def create_app(bot: Any = None) -> web.Application:
             web.post("/api/stock/locations", handle_location_create),
             web.get(r"/api/stock/locations/{location_id:\d+}", handle_location_contents),
             web.post(r"/api/stock/locations/{location_id:\d+}", handle_location_update),
+            web.delete(r"/api/stock/locations/{location_id:\d+}", handle_location_delete),
             web.get("/api/stock/overview", handle_overview),
             web.get("/api/stock/receiving", handle_receiving),
             web.post("/api/stock/place", handle_place),

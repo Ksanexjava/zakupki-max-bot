@@ -171,6 +171,41 @@ def test_shelves_boxes_and_purposes():
     run(scenario())
 
 
+def test_delete_shelf_only_when_empty():
+    async def scenario():
+        client = await _client()
+        try:
+            await _login(client, STOCK_LOGIN, STOCK_PASS)
+            shelf = await repo.create_location("shelf", "Полка на удаление")
+            box = await repo.create_location("box", "Пустая коробка", parent_id=shelf["id"])
+            busy = await repo.create_location("shelf", "Полка с товаром")
+            result = await repo.receive_manual(name="Губки (удаление)", quantity=3)
+            await repo.place(product_id=result["product_id"], quantity=3, to_location_id=busy["id"])
+
+            # с товаром не удаляем
+            response = await client.delete(f"/api/stock/locations/{busy['id']}")
+            assert response.status == 409
+            assert (await response.json())["error"] == "not_empty"
+
+            # пустую — вместе с коробкой на ней
+            response = await client.delete(f"/api/stock/locations/{shelf['id']}")
+            assert (await response.json())["deleted"] == [shelf["code"], box["code"]]
+            codes = {l["code"] for l in await repo.list_locations()}
+            assert shelf["code"] not in codes and box["code"] not in codes and busy["code"] in codes
+            assert (await client.get("/api/stock/resolve", params={"code": shelf["code"]})).status == 404
+            assert (await repo.place(product_id=result["product_id"], quantity=1,
+                                     to_location_id=box["id"], from_location_id=busy["id"]))["error"] == "no_location"
+            assert (await client.delete(f"/api/stock/locations/{shelf['id']}")).status == 404
+
+            # код удалённой полки новой не достаётся — старая наклейка не обманет
+            fresh = await repo.create_location("shelf", "Новая полка")
+            assert fresh["code"] != shelf["code"]
+        finally:
+            await client.close()
+
+    run(scenario())
+
+
 def test_old_shelf_purposes_move_to_sections():
     async def scenario():
         from db import migrate

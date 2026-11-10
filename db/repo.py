@@ -1061,6 +1061,40 @@ async def update_location(
         return location_to_dict(location, [link.category_id for link in links])
 
 
+async def delete_location(location_id: int) -> dict[str, Any]:
+    """Удаляет полку, коробку или место на полке.
+
+    Удаление мягкое: место пропадает из списков и сканера, но остаётся в истории
+    движений, а его код больше никому не выдаётся — старая наклейка не укажет
+    на новое место. Вместе с полкой удаляются стоящие на ней коробки и места.
+    Если внутри есть товар, ничего не удаляется: его сначала перекладывают или выдают.
+    """
+    async with Session() as session:
+        location = await session.get(Location, location_id)
+        if location is None or location.kind == "zone" or not location.active:
+            return {"ok": False, "error": "not_found"}
+        children = (
+            await session.execute(
+                select(Location).where(Location.parent_id == location_id, Location.active.is_(True))
+            )
+        ).scalars().all()
+        ids = {location.id} | {child.id for child in children}
+        balances = await _balances(session)
+        products = sum(1 for (_, lid), quantity in balances.items() if lid in ids and quantity > 1e-9)
+        instances = (
+            await session.execute(
+                select(func.count()).select_from(Instance)
+                .where(Instance.location_id.in_(ids), Instance.status == "stock")
+            )
+        ).scalar_one()
+        if products or instances:
+            return {"ok": False, "error": "not_empty", "products": products, "instances": instances}
+        for place in [location, *children]:
+            place.active = False
+        await session.commit()
+        return {"ok": True, "deleted": [location.code, *(child.code for child in children)]}
+
+
 async def _balances(session: AsyncSession) -> dict[tuple[int, int], float]:
     """Остаток по каждой паре (товар, место): пришло туда минус ушло оттуда."""
     totals: dict[tuple[int, int], float] = {}
@@ -1127,7 +1161,7 @@ async def resolve_code(code: str) -> dict[str, Any] | None:
         location = (
             await session.execute(select(Location).where(Location.code == cleaned))
         ).scalar_one_or_none()
-        if location is not None:
+        if location is not None and location.active:
             return {"type": location.kind, "code": cleaned, "id": location.id}
         instance = (
             await session.execute(select(Instance).where(Instance.code == cleaned))
@@ -1311,7 +1345,7 @@ async def place(
     """
     async with Session() as session:
         target = await session.get(Location, to_location_id)
-        if target is None:
+        if target is None or not target.active:
             return {"ok": False, "error": "no_location"}
 
         if instance_id is not None:
