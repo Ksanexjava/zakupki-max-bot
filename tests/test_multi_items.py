@@ -151,3 +151,35 @@ def test_bought_mark_does_not_touch_status():
         assert data["bought_count"] == 0
 
     asyncio.run(scenario())
+
+
+def test_link_inside_item_name_is_extracted():
+    """Ссылка, вставленная прямо в название, уходит в отдельное поле."""
+
+    async def scenario():
+        await init_db()
+        bot = FakeBot()
+        dp = build(bot)
+        for event in [
+            callback_event(bot, "menu:new"),
+            callback_event(bot, "form:self"),
+            callback_event(bot, "form:mode:one"),
+            message_event(bot, "Хлорка в таблетках Русь-Хлор 1 кг https://ozon.ru/t/ye8ABe5"),
+            message_event(bot, "3 шт"),
+        ]:
+            await dp.handle(event)
+        # шаг «пример» пропущен: ссылка уже есть, бот сразу спрашивает срок
+        assert "К какому сроку" in bot.messages[-1]["text"]
+
+        for event in [
+            callback_event(bot, "form:deadline:urgent"),
+            message_event(bot, "Дезинфекция"),
+            callback_event(bot, "form:submit"),
+        ]:
+            await dp.handle(event)
+
+        request = (await repo.list_requests(query="Русь-Хлор"))[0]
+        assert request.items[0].name == "Хлорка в таблетках Русь-Хлор 1 кг"
+        assert request.items[0].link == "https://ozon.ru/t/ye8ABe5"
+
+    asyncio.run(scenario())

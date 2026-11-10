@@ -198,6 +198,16 @@ class Product(Base):
     #: нормализованное название — по нему ищем совпадения
     norm_name: Mapped[str] = mapped_column(String(600), unique=True, index=True)
     unit: Mapped[str] = mapped_column(String(30), default="")
+    #: подкатегория (или категория, если подкатегории нет)
+    category_id: Mapped[int | None] = mapped_column(
+        ForeignKey("categories.id", ondelete="SET NULL"), default=None, index=True
+    )
+    #: категорию выставили руками — автоклассификатор её больше не трогает
+    category_manual: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: поштучный учёт: None — как у категории, True/False — переопределено вручную
+    serialized: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    #: ниже этого остатка склад подсвечивает «пора заказывать»
+    min_stock: Mapped[float | None] = mapped_column(Float, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -207,15 +217,28 @@ class Movement(Base):
     __tablename__ = "movements"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    item_id: Mapped[int] = mapped_column(
-        ForeignKey("items.id", ondelete="CASCADE"), index=True
+    #: позиция заявки; пусто у движений не по заявке (инвентаризация, перемещение)
+    item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("items.id", ondelete="CASCADE"), default=None, index=True
     )
     product_id: Mapped[int | None] = mapped_column(
         ForeignKey("products.id", ondelete="SET NULL"), default=None, index=True
     )
-    #: in — приняли на склад, out — выдали со склада
+    #: in — приняли, out — выдали, move — переложили, adjust — инвентаризация/списание
     kind: Mapped[str] = mapped_column(String(8))
     quantity: Mapped[float] = mapped_column(Float, default=0)
+
+    #: откуда и куда. Остаток в месте = всё, что пришло туда, минус всё, что ушло
+    from_location_id: Mapped[int | None] = mapped_column(
+        ForeignKey("locations.id", ondelete="SET NULL"), default=None, index=True
+    )
+    to_location_id: Mapped[int | None] = mapped_column(
+        ForeignKey("locations.id", ondelete="SET NULL"), default=None, index=True
+    )
+    #: экземпляр крупного товара, если движение поштучное
+    instance_id: Mapped[int | None] = mapped_column(
+        ForeignKey("instances.id", ondelete="SET NULL"), default=None, index=True
+    )
 
     #: кто сделал (сотрудник склада) и под каким логином
     actor_employee_id: Mapped[int | None] = mapped_column(
@@ -232,7 +255,82 @@ class Movement(Base):
     note: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
-    item: Mapped[Item] = relationship(back_populates="movements")
+    item: Mapped[Item | None] = relationship(back_populates="movements")
+
+
+class Category(Base):
+    """Категория и подкатегория товара: «Медицина → Расходники»."""
+
+    __tablename__ = "categories"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    parent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("categories.id", ondelete="CASCADE"), default=None, index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    #: товары этой категории по умолчанию учитываются поштучно, со своим QR
+    serialized: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: слова, по которым товар относится к категории — через запятую
+    keywords: Mapped[str] = mapped_column(Text, default="")
+
+
+class Location(Base):
+    """Место хранения: полка, коробка на полке или служебная зона."""
+
+    __tablename__ = "locations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: shelf — полка, box — коробка, zone — служебная зона (приёмка)
+    kind: Mapped[str] = mapped_column(String(10), default="shelf")
+    #: код на наклейке: SH-01, BX-001
+    code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), default="")
+    #: коробка стоит на полке
+    parent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("locations.id", ondelete="SET NULL"), default=None, index=True
+    )
+    note: Mapped[str] = mapped_column(Text, default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class LocationCategory(Base):
+    """Назначение места: какие категории здесь хранятся."""
+
+    __tablename__ = "location_categories"
+
+    location_id: Mapped[int] = mapped_column(
+        ForeignKey("locations.id", ondelete="CASCADE"), primary_key=True
+    )
+    category_id: Mapped[int] = mapped_column(
+        ForeignKey("categories.id", ondelete="CASCADE"), primary_key=True
+    )
+
+
+class Instance(Base):
+    """Экземпляр крупного товара — со своим QR, как инвентарный номер."""
+
+    __tablename__ = "instances"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: код на наклейке: IN-00001
+    code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    product_id: Mapped[int] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), index=True
+    )
+    #: из какой позиции заявки пришёл; пусто — завели при инвентаризации
+    item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("items.id", ondelete="SET NULL"), default=None
+    )
+    location_id: Mapped[int | None] = mapped_column(
+        ForeignKey("locations.id", ondelete="SET NULL"), default=None, index=True
+    )
+    #: stock — на складе, issued — выдан
+    status: Mapped[str] = mapped_column(String(10), default="stock")
+    issued_to: Mapped[str] = mapped_column(String(300), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
 
 class Admin(Base):

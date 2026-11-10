@@ -1,12 +1,18 @@
 'use strict';
 
+/* ================================================================ основа */
+
 const state = {
   user: null,
-  tab: 'pending',
-  rows: [],
+  role: null,
   employees: [],
-  actor: null,      // кто сейчас работает на складе
-  openItem: null,
+  actor: null,          // кто сейчас работает
+  categories: [],       // дерево
+  catPath: {},          // id -> «Медицина → Расходники»
+  catParent: {},        // id подкатегории -> id раздела
+  locations: [],
+  view: 'priemka',
+  arg: null,
 };
 
 const el = (id) => document.getElementById(id);
@@ -24,7 +30,7 @@ function toast(message) {
   node.textContent = message;
   node.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { node.hidden = true; }, message.length > 70 ? 8000 : 3000);
+  toastTimer = setTimeout(() => { node.hidden = true; }, message.length > 70 ? 8000 : 3200);
 }
 
 async function api(path, options = {}) {
@@ -36,16 +42,23 @@ async function api(path, options = {}) {
   if (!response.ok) throw Object.assign(new Error(data.error || 'failed'), { data });
   return data;
 }
+const post = (path, body) => api(path, { method: 'POST', body: JSON.stringify(body) });
 
-/* ------------------------------------------------------------------ вход */
+function explain(error) {
+  const data = error.data || {};
+  if (data.error === 'not_enough') return `Столько нет: в этом месте ${num(data.available)}`;
+  if (data.error === 'forbidden') return 'Нет прав на это действие';
+  return 'Не получилось — проверьте данные';
+}
+
+/* =============================================================== вход */
 
 function showLogin(message) {
   el('app').hidden = true;
   el('overlay').hidden = true;
   el('login-screen').hidden = false;
-  const error = el('login-error');
-  error.hidden = !message;
-  error.textContent = message || '';
+  el('login-error').hidden = !message;
+  el('login-error').textContent = message || '';
 }
 
 el('login-form').addEventListener('submit', async (event) => {
@@ -57,12 +70,8 @@ el('login-form').addEventListener('submit', async (event) => {
   });
   if (!response.ok) { showLogin('Неверный логин или пароль.'); return; }
   const data = await response.json();
-  state.user = data.user;
   el('password').value = '';
-  el('login-screen').hidden = true;
-  el('app').hidden = false;
-  el('user-chip').textContent = state.user || '';
-  await boot();
+  await start(data.user, data.role);
 });
 
 el('logout-btn').addEventListener('click', async () => {
@@ -70,18 +79,33 @@ el('logout-btn').addEventListener('click', async () => {
   showLogin();
 });
 
-/* ------------------------------------------------------- кто работает */
+/* ===================================================== справочники */
 
 async function loadEmployees() {
-  const data = await api('/api/employees');
-  state.employees = data.employees;
-  const saved = localStorage.getItem('pb_stock_actor');
-  const select = el('actor');
-  select.innerHTML = '<option value="">— выберите —</option>' + state.employees.map((e) => `
-    <option value="${e.id}" ${String(e.id) === saved ? 'selected' : ''}>
-      ${esc(e.full_name)}${e.department ? ` · ${esc(e.department)}` : ''}
-    </option>`).join('');
+  state.employees = (await api('/api/employees')).employees;
+  let saved = null;
+  try { saved = localStorage.getItem('pb_stock_actor'); } catch (e) { /* приватный режим */ }
+  el('actor').innerHTML = '<option value="">— кто работает —</option>' + state.employees.map((e) =>
+    `<option value="${e.id}" ${String(e.id) === saved ? 'selected' : ''}>${esc(e.full_name)}</option>`
+  ).join('');
   state.actor = state.employees.find((e) => String(e.id) === saved) || null;
+}
+
+async function loadCategories() {
+  state.categories = (await api('/api/stock/categories')).categories;
+  state.catPath = {};
+  state.catParent = {};
+  for (const top of state.categories) {
+    state.catPath[top.id] = top.name;
+    for (const child of top.children) {
+      state.catPath[child.id] = `${top.name} → ${child.name}`;
+      state.catParent[child.id] = top.id;
+    }
+  }
+}
+
+async function loadLocations() {
+  state.locations = (await api('/api/stock/locations')).locations;
 }
 
 el('actor').addEventListener('change', (event) => {
@@ -90,287 +114,1115 @@ el('actor').addEventListener('change', (event) => {
   try { localStorage.setItem('pb_stock_actor', id); } catch (e) { /* приватный режим */ }
 });
 
-el('add-employee').addEventListener('click', async () => {
-  const name = prompt('ФИО сотрудника:');
-  if (!name || !name.trim()) return;
-  const data = await api('/api/employees', {
-    method: 'POST',
-    body: JSON.stringify({ full_name: name.trim(), is_stock: true }),
+el('add-employee').addEventListener('click', () => {
+  openModal('Новый сотрудник', `
+    <div class="form-row"><label>ФИО</label>
+      <input type="text" id="f-emp-name" placeholder="Иванова Мария Петровна"></div>
+    <div class="form-row"><label>Отделение (необязательно)</label>
+      <input type="text" id="f-emp-dep"></div>
+    <label class="check-row"><input type="checkbox" id="f-emp-stock" checked> Работает на складе — сразу выбрать</label>
+    <button class="btn btn-primary btn-lg btn-block" id="f-ok">Добавить</button>`);
+  el('f-ok').addEventListener('click', async () => {
+    const name = el('f-emp-name').value.trim();
+    if (!name) { toast('Введите ФИО'); return; }
+    const isStock = el('f-emp-stock').checked;
+    const data = await post('/api/employees', {
+      full_name: name, department: el('f-emp-dep').value.trim(), is_stock: isStock,
+    });
+    closeModal();
+    await loadEmployees();
+    if (isStock) {
+      el('actor').value = data.employee.id;
+      el('actor').dispatchEvent(new Event('change'));
+    }
+    toast('Сотрудник добавлен');
   });
-  await loadEmployees();
-  el('actor').value = data.employee.id;
-  el('actor').dispatchEvent(new Event('change'));
-  toast('Сотрудник добавлен');
 });
 
-/* --------------------------------------------------------------- списки */
+function requireActor() {
+  if (state.actor) return true;
+  toast('Сначала выберите, кто работает — список вверху');
+  el('actor').focus();
+  return false;
+}
+const actorPayload = () => ({ actor_name: state.actor.full_name, actor_employee_id: state.actor.id });
 
-function card(row) {
+function categoryOptions(selected) {
+  return '<option value="">— без категории —</option>' + state.categories.map((top) => `
+    <optgroup label="${esc(top.name)}">
+      <option value="${top.id}" ${top.id === selected ? 'selected' : ''}>${esc(top.name)} (весь раздел)</option>
+      ${top.children.map((c) => `<option value="${c.id}" ${c.id === selected ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+    </optgroup>`).join('');
+}
+
+/** Подходит ли место под категорию товара: совпадает подкатегория или раздел. */
+function locationFits(location, categoryId) {
+  if (!categoryId || !location.category_ids.length) return false;
+  const parent = state.catParent[categoryId];
+  return location.category_ids.includes(categoryId) || (parent && location.category_ids.includes(parent));
+}
+
+/** Где лежит — коротко: «в приёмке», «SH-01» или «SH-01 › BX-001» для коробки на полке. */
+function whereText(locationId, code) {
+  if (!code) return '';
+  const loc = state.locations.find((l) => l.id === locationId);
+  if (loc && loc.kind === 'zone') return 'в приёмке';
+  const parent = loc && loc.parent_id ? state.locations.find((l) => l.id === loc.parent_id) : null;
+  return parent ? `${parent.code} › ${code}` : code;
+}
+
+function locationLabel(location) {
+  const kind = location.kind === 'box' ? 'коробка' : location.kind === 'zone' ? 'зона' : 'полка';
+  return `${location.code} · ${location.name} (${kind})`;
+}
+
+function locationOptions(categoryId, excludeId) {
+  const usable = state.locations.filter((l) => l.kind !== 'zone' && l.id !== excludeId);
+  const fit = usable.filter((l) => locationFits(l, categoryId));
+  const rest = usable.filter((l) => !locationFits(l, categoryId));
+  const opt = (l) => `<option value="${l.id}">${esc(locationLabel(l))}</option>`;
+  return (fit.length ? `<optgroup label="Подходят по категории">${fit.map(opt).join('')}</optgroup>` : '')
+    + (rest.length ? `<optgroup label="${fit.length ? 'Остальные' : 'Места'}">${rest.map(opt).join('')}</optgroup>` : '');
+}
+
+function employeeOptions(selectedName) {
+  return '<option value="">— не из списка —</option>' + state.employees.map((e) =>
+    `<option value="${e.id}" ${e.full_name === selectedName ? 'selected' : ''}>${esc(e.full_name)}</option>`
+  ).join('');
+}
+
+function recipientFrom(selectId, otherId) {
+  const chosen = el(selectId).value;
+  if (chosen) {
+    const person = state.employees.find((e) => String(e.id) === chosen);
+    return { recipient_employee_id: person.id, recipient_name: person.full_name };
+  }
+  const other = el(otherId).value.trim();
+  return other ? { recipient_name: other } : {};
+}
+
+/* ============================================================= модалка */
+
+function openModal(title, html) {
+  el('modal-title').textContent = title;
+  el('modal-body').innerHTML = html;
+  el('overlay').hidden = false;
+  const first = el('modal-body').querySelector('input, select, textarea');
+  if (first) first.focus();
+}
+function closeModal() {
+  el('overlay').hidden = true;
+  el('modal-body').innerHTML = '';
+}
+el('modal-close').addEventListener('click', closeModal);
+el('overlay').addEventListener('click', (event) => { if (event.target === el('overlay')) closeModal(); });
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  if (!el('scan-overlay').hidden) closePickScanner();
+  else if (!el('overlay').hidden) closeModal();
+});
+
+/* ============================================================ сканер */
+
+const Scanner = {
+  stream: null,
+  raf: null,
+  detector: null,
+
+  /** Живая камера работает только по HTTPS (или на localhost). */
+  liveAvailable() {
+    return window.isSecureContext && !!navigator.mediaDevices?.getUserMedia;
+  },
+
+  async start(video, onCode) {
+    this.stop();
+    this.stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' } }, audio: false,
+    });
+    video.srcObject = this.stream;
+    video.setAttribute('playsinline', '');
+    await video.play();
+    if ('BarcodeDetector' in window) {
+      try { this.detector = new BarcodeDetector({ formats: ['qr_code'] }); } catch (e) { this.detector = null; }
+    }
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const tick = async () => {
+      if (!this.stream) return;
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        let text = null;
+        if (this.detector) {
+          try {
+            const found = await this.detector.detect(video);
+            if (found.length) text = found[0].rawValue;
+          } catch (e) { this.detector = null; }
+        } else {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          ctx.drawImage(video, 0, 0);
+          const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const code = window.jsQR && jsQR(frame.data, frame.width, frame.height, { inversionAttempts: 'dontInvert' });
+          if (code) text = code.data;
+        }
+        if (text) {
+          this.stop();
+          if (navigator.vibrate) navigator.vibrate(60);
+          onCode(text);
+          return;
+        }
+      }
+      this.raf = requestAnimationFrame(tick);
+    };
+    this.raf = requestAnimationFrame(tick);
+  },
+
+  stop() {
+    if (this.raf) cancelAnimationFrame(this.raf);
+    this.raf = null;
+    if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
+    this.stream = null;
+  },
+
+  /** Запасной путь без HTTPS: сфотографировать код и распознать снимок. */
+  async decodeFile(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const image = await new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = url;
+      });
+      const scale = Math.min(1, 1600 / Math.max(image.width, image.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(image.width * scale);
+      canvas.height = Math.round(image.height * scale);
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const code = jsQR(frame.data, frame.width, frame.height);
+      return code ? code.data : null;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  },
+};
+
+/** Блок сканера: камера, фото или ручной ввод. onCode получает строку из QR. */
+function scannerHtml(prefix) {
+  const live = Scanner.liveAvailable();
+  return `
+    <div class="scanner">
+      ${live ? `
+        <div class="scanner-video" id="${prefix}-box" hidden>
+          <video id="${prefix}-video" muted playsinline></video>
+          <div class="frame"></div>
+        </div>` : ''}
+      <div class="scanner-actions">
+        ${live
+          ? `<button class="btn btn-primary btn-lg" id="${prefix}-start">Включить камеру</button>`
+          : `<label class="btn btn-primary btn-lg" style="text-align:center">
+               Сфотографировать QR
+               <input type="file" accept="image/*" capture="environment" id="${prefix}-photo" hidden>
+             </label>`}
+        <div class="inline-row">
+          <input type="text" id="${prefix}-manual" placeholder="или введите код: SH-01, BX-001, IN-00001">
+          <button class="btn" id="${prefix}-go" style="flex:0">Найти</button>
+        </div>
+      </div>
+      ${live ? '' : `<p class="scanner-note">Живая камера включится, когда у сайта появится HTTPS.
+        Пока можно сфотографировать код или навести на него обычную камеру телефона — откроется эта же страница.</p>`}
+    </div>`;
+}
+
+function bindScanner(prefix, onCode) {
+  const go = () => {
+    const value = el(`${prefix}-manual`).value.trim();
+    if (value) onCode(value);
+  };
+  el(`${prefix}-go`).addEventListener('click', go);
+  el(`${prefix}-manual`).addEventListener('keydown', (event) => { if (event.key === 'Enter') go(); });
+
+  const startBtn = el(`${prefix}-start`);
+  if (startBtn) {
+    startBtn.addEventListener('click', async () => {
+      el(`${prefix}-box`).hidden = false;
+      startBtn.hidden = true;
+      try {
+        await Scanner.start(el(`${prefix}-video`), (text) => {
+          el(`${prefix}-box`).hidden = true;
+          startBtn.hidden = false;
+          startBtn.textContent = 'Сканировать ещё';
+          onCode(text);
+        });
+      } catch (error) {
+        el(`${prefix}-box`).hidden = true;
+        startBtn.hidden = false;
+        toast('Камера недоступна — разрешите доступ в настройках браузера');
+      }
+    });
+  }
+  const photo = el(`${prefix}-photo`);
+  if (photo) {
+    photo.addEventListener('change', async () => {
+      const file = photo.files[0];
+      if (!file) return;
+      const text = await Scanner.decodeFile(file);
+      photo.value = '';
+      if (text) onCode(text);
+      else toast('Не вижу QR на снимке — попробуйте ближе и ровнее');
+    });
+  }
+}
+
+/* «Скан полки» внутри формы: открывает сканер поверх и возвращает место */
+let pickResolve = null;
+function pickLocationByScan() {
+  return new Promise((resolve) => {
+    pickResolve = resolve;
+    el('scan-overlay-title').textContent = 'Отсканируйте полку или коробку';
+    el('scan-overlay-body').innerHTML = scannerHtml('pick');
+    el('scan-overlay').hidden = false;
+    bindScanner('pick', async (text) => {
+      try {
+        const found = await api(`/api/stock/resolve?code=${encodeURIComponent(text)}`);
+        if (!['shelf', 'box'].includes(found.type)) { toast('Это не полка и не коробка'); return; }
+        const location = state.locations.find((l) => l.id === found.id);
+        closePickScanner(location || null);
+      } catch (e) {
+        toast(`Код ${text} не найден`);
+      }
+    });
+  });
+}
+function closePickScanner(result = null) {
+  Scanner.stop();
+  el('scan-overlay').hidden = true;
+  el('scan-overlay-body').innerHTML = '';
+  if (pickResolve) { pickResolve(result); pickResolve = null; }
+}
+el('scan-overlay-close').addEventListener('click', () => closePickScanner());
+
+/* ============================================================ навигация */
+
+const VIEWS = {
+  priemka: { title: 'Приёмка', render: viewReceiving },
+  razmeshchenie: { title: 'Размещение', render: viewPlacement },
+  hranenie: { title: 'Хранение', render: viewStorage },
+  vydacha: { title: 'Выдача', render: viewIssue },
+  scan: { title: 'Сканер', render: viewScan },
+  mesta: { title: 'Места', render: viewLocations },
+  qr: { title: 'QR-наклейки', render: viewQr },
+  tovary: { title: 'Товары', render: viewProducts },
+  istoriya: { title: 'История', render: viewHistory },
+};
+
+function renderNav() {
+  el('stock-nav').innerHTML = Object.entries(VIEWS).map(([key, view]) =>
+    `<a href="#/${key}" class="${key === state.view ? 'active' : ''}" data-view="${key}">${esc(view.title)}<span class="count" id="nav-count-${key}"></span></a>`
+  ).join('');
+  // на телефоне вкладки прокручиваются — держим текущую в поле зрения
+  const active = el('stock-nav').querySelector('.active');
+  if (active) active.scrollIntoView({ inline: 'center', block: 'nearest' });
+}
+
+async function route() {
+  Scanner.stop();
+  closeModal();
+  const [, view, ...rest] = (location.hash || '#/priemka').split('/');
+  state.view = VIEWS[view] ? view : 'priemka';
+  state.arg = rest.length ? decodeURIComponent(rest.join('/')) : null;
+  renderNav();
+  document.title = `${VIEWS[state.view].title} — склад`;
+  el('view').innerHTML = '<p class="muted">Загружаю…</p>';
+  try {
+    await VIEWS[state.view].render(el('view'));
+  } catch (error) {
+    if (error.message !== 'unauthorized') {
+      el('view').innerHTML = '<p class="empty">Не удалось загрузить. Обновите страницу.</p>';
+    }
+  }
+  refreshCounts().catch(() => {});
+}
+window.addEventListener('hashchange', route);
+
+async function refreshCounts() {
+  const [pending, receiving, onHand] = await Promise.all([
+    api('/api/stock/queue?kind=pending'),
+    api('/api/stock/receiving'),
+    api('/api/stock/queue?kind=on_hand'),
+  ]);
+  const set = (key, value) => { const n = el(`nav-count-${key}`); if (n) n.textContent = value || ''; };
+  set('priemka', pending.items.length);
+  set('razmeshchenie', bulkInZone(receiving).length + receiving.instances.length);
+  set('vydacha', onHand.items.length);
+}
+
+/* ============================================================ приёмка */
+
+function requestCard(row, mode) {
   const ordered = row.qty_number;
-  const done = state.tab === 'pending' ? row.received : row.issued;
+  const done = mode === 'in' ? row.received : row.issued;
   const left = ordered !== null ? Math.max(ordered - done, 0) : null;
   const percent = ordered ? Math.min(100, Math.round((done / ordered) * 100)) : 0;
-
-  const bits = [`заявка №${row.request_id}`, esc(row.requester || '')];
-  if (row.deadline) bits.push(esc(row.deadline));
-  const link = row.link
-    ? ` · <a href="${esc(row.link)}" target="_blank" rel="noopener">ссылка</a>` : '';
-
-  const actions = state.tab === 'pending'
+  const link = row.link ? ` · <a href="${esc(row.link)}" target="_blank" rel="noopener">ссылка</a>` : '';
+  const actions = mode === 'in'
     ? `<button class="btn btn-primary btn-lg" data-full="${row.id}">Принял полностью</button>
        <button class="btn btn-lg" data-part="${row.id}">Частично</button>`
     : `<button class="btn btn-primary btn-lg" data-issue="${row.id}">Выдать</button>`;
-
   return `
     <article class="stock-card">
       <div class="stock-main">
-        <div class="stock-name">${esc(row.name)}<span class="stock-code">${esc(row.stock_code || '')}</span></div>
-        <div class="stock-meta">${bits.filter(Boolean).join(' · ')}${link}</div>
+        <div class="stock-name">${esc(row.name)} <span class="code-chip">${esc(row.stock_code || '')}</span></div>
+        <div class="stock-meta">заявка №${row.request_id} · ${esc(row.requester || '')}${row.deadline ? ` · ${esc(row.deadline)}` : ''}${link}</div>
         ${ordered !== null ? `<div class="progress"><i style="width:${percent}%"></i></div>` : ''}
       </div>
       <div class="stock-qty">
         <div class="big">${ordered !== null ? `${num(done)} / ${num(ordered)}` : num(done)}</div>
-        <div class="sub">${esc(row.qty_unit || row.quantity || '')}${
-          left ? ` · осталось ${num(left)}` : ''}</div>
+        <div class="sub">${esc(row.qty_unit || row.quantity || '')}${left ? ` · осталось ${num(left)}` : ''}</div>
       </div>
       <div class="stock-actions">${actions}</div>
     </article>`;
 }
 
-function historyRow(movement) {
-  return `
-    <div class="hist-row">
-      <span class="hist-kind ${esc(movement.kind)}">${movement.kind === 'in' ? 'Принято' : 'Выдано'} ${num(movement.quantity)}</span>
-      <span>${esc(movement.item_name || '')} <span class="stock-code">${esc(movement.stock_code || '')}</span></span>
-      <span class="muted">${esc(movement.actor_name)}${
-        movement.recipient_name ? ` → ${esc(movement.recipient_name)}` : ''}</span>
-      <span class="hist-when">${esc(movement.created_at)}</span>
-    </div>`;
+async function viewReceiving(root) {
+  const data = await api('/api/stock/queue?kind=pending');
+  root.innerHTML = `
+    <div class="view-head"><h2>Приёмка</h2></div>
+    <p class="view-hint">Позиции, которые закупки отметили заказанными. Принятое попадает в зону приёмки — потом его раскладывают по полкам в «Размещении».</p>
+    <div class="stock-list">${data.items.map((row) => requestCard(row, 'in')).join('')}</div>
+    ${data.items.length ? '' : '<p class="empty">Ничего не ждём — все заказы приняты.</p>'}`;
+
+  const rows = Object.fromEntries(data.items.map((r) => [r.id, r]));
+  root.querySelectorAll('[data-full]').forEach((b) => b.addEventListener('click', () => {
+    const row = rows[b.dataset.full];
+    const left = row.qty_number !== null ? Math.max(row.qty_number - row.received, 0) : 1;
+    receive(row, left, true);
+  }));
+  root.querySelectorAll('[data-part]').forEach((b) => b.addEventListener('click', () => receiveForm(rows[b.dataset.part])));
 }
 
-async function load() {
-  if (state.tab === 'history') {
-    const data = await api('/api/stock/history');
-    state.rows = data.movements;
-    el('list').className = 'hist';
-    el('list').innerHTML = data.movements.map(historyRow).join('');
-  } else {
-    const data = await api(`/api/stock/queue?kind=${state.tab}`);
-    state.rows = data.items;
-    el('list').className = 'stock-list';
-    el('list').innerHTML = data.items.map(card).join('');
-    bindCards();
-  }
-  el('empty').hidden = state.rows.length > 0;
-  await refreshCounts();
-}
-
-async function refreshCounts() {
-  const [pending, onHand] = await Promise.all([
-    api('/api/stock/queue?kind=pending'),
-    api('/api/stock/queue?kind=on_hand'),
-  ]);
-  el('count-pending').textContent = pending.items.length;
-  el('count-onhand').textContent = onHand.items.length;
-}
-
-function bindCards() {
-  el('list').querySelectorAll('[data-full]').forEach((button) => {
-    button.addEventListener('click', () => receiveFull(Number(button.dataset.full)));
-  });
-  el('list').querySelectorAll('[data-part]').forEach((button) => {
-    button.addEventListener('click', () => openForm(Number(button.dataset.part), 'in'));
-  });
-  el('list').querySelectorAll('[data-issue]').forEach((button) => {
-    button.addEventListener('click', () => openForm(Number(button.dataset.issue), 'out'));
-  });
-}
-
-document.querySelectorAll('.tab').forEach((tab) => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === tab));
-    state.tab = tab.dataset.tab;
-    load();
-  });
-});
-
-el('refresh-btn').addEventListener('click', () => load());
-
-/* ----------------------------------------------------------- операции */
-
-function requireActor() {
-  if (!state.actor) {
-    toast('Сначала выберите, кто работает — список вверху справа');
-    el('actor').focus();
-    return false;
-  }
-  return true;
-}
-
-async function send(payload) {
-  const result = await api('/api/stock/movement', { method: 'POST', body: JSON.stringify(payload) });
-  const messages = [];
-  if (payload.kind === 'in') messages.push('Принято');
-  else messages.push('Выдано');
-  if (result.request_arrived) {
-    messages.push(result.author_notified
-      ? 'заявка собрана, автору отправлено сообщение'
-      : 'заявка собрана');
-  }
-  if (result.request_completed) messages.push('заявка закрыта');
-  toast(messages.join(' · '));
-  closeModal();
-  await load();
-}
-
-async function receiveFull(itemId) {
+function receiveForm(row) {
   if (!requireActor()) return;
-  const row = state.rows.find((r) => r.id === itemId);
-  const left = row.qty_number !== null ? Math.max(row.qty_number - row.received, 0) : 0;
-  await send({
-    kind: 'in',
-    item_id: itemId,
-    quantity: left,
-    close: true,
-    actor_name: state.actor.full_name,
-    actor_employee_id: state.actor.id,
-  });
-}
-
-function openForm(itemId, kind) {
-  if (!requireActor()) return;
-  const row = state.rows.find((r) => r.id === itemId);
-  state.openItem = row;
-
-  const left = kind === 'in'
-    ? (row.qty_number !== null ? Math.max(row.qty_number - row.received, 0) : 1)
-    : row.on_hand;
-
-  const people = state.employees.map((e) =>
-    `<option value="${e.id}" ${e.full_name === row.author_name ? 'selected' : ''}>${esc(e.full_name)}</option>`
-  ).join('');
-
-  el('modal-title').textContent = kind === 'in' ? 'Приём на склад' : 'Выдача со склада';
-  el('modal-body').innerHTML = `
+  const left = row.qty_number !== null ? Math.max(row.qty_number - row.received, 0) : 1;
+  openModal('Приёмка', `
     <div class="stock-name">${esc(row.name)}</div>
-    <div class="stock-meta" style="margin-bottom:16px">
-      заявка №${row.request_id} · заказано ${row.qty_number !== null ? num(row.qty_number) : '—'}
-      ${esc(row.qty_unit || '')} · ${kind === 'in' ? `принято ${num(row.received)}` : `на складе ${num(row.on_hand)}`}
-    </div>
-
-    <div class="form-row">
-      <label>Количество</label>
-      <input type="number" id="qty" class="qty-input" min="0" step="any" value="${num(left)}">
-    </div>
-
-    ${kind === 'out' ? `
-    <div class="form-row">
-      <label>Кому выдали</label>
-      <select id="recipient">
-        <option value="">— не из списка —</option>
-        ${people}
-      </select>
-    </div>
-    <div class="form-row">
-      <label>Если получателя нет в списке — впишите</label>
-      <input type="text" id="recipient-other" placeholder="ФИО">
-    </div>` : ''}
-
-    <div class="form-row">
-      <label>Примечание (необязательно)</label>
-      <input type="text" id="note" placeholder="например: привезли частично, остальное в пятницу">
-    </div>
-
+    <div class="stock-meta" style="margin-bottom:14px">заявка №${row.request_id} · заказано ${row.qty_number !== null ? num(row.qty_number) : '—'} ${esc(row.qty_unit || '')} · принято ${num(row.received)}</div>
+    <div class="form-row"><label>Сколько приняли</label>
+      <input type="number" id="f-qty" class="qty-input" min="0" step="any" value="${num(left)}"></div>
+    <div class="form-row"><label>Примечание</label>
+      <input type="text" id="f-note" placeholder="например: остальное привезут в пятницу"></div>
     <div class="row-actions">
-      <button class="btn btn-primary btn-lg" id="do-move">${kind === 'in' ? 'Принять' : 'Выдать'}</button>
-      <button class="btn btn-lg" id="do-close">${kind === 'in' ? 'Принять и закрыть' : 'Выдать всё и закрыть'}</button>
+      <button class="btn btn-primary btn-lg" id="f-ok">Принять</button>
+      <button class="btn btn-lg" id="f-close">Принять и закрыть позицию</button>
+    </div>`);
+  const submit = (close) => receive(row, Number(el('f-qty').value || 0), close, el('f-note').value.trim());
+  el('f-ok').addEventListener('click', () => submit(false));
+  el('f-close').addEventListener('click', () => submit(true));
+}
+
+async function receive(row, quantity, close, note = '') {
+  if (!requireActor()) return;
+  const result = await post('/api/stock/movement', {
+    kind: 'in', item_id: row.id, quantity, close, note, ...actorPayload(),
+  });
+  closeModal();
+  const parts = ['Принято, лежит в зоне приёмки'];
+  if (result.request_arrived) parts.push(result.author_notified ? 'автору отправлено сообщение' : 'заявка собрана');
+  toast(parts.join(' · '));
+  await route();  // перерисовка закрывает модалки — окно с наклейками открываем после
+  if (result.instances_created && result.instances_created.length) {
+    const codes = result.instances_created.join(',');
+    openModal('Крупный товар — нужны наклейки', `
+      <p>Товар учитывается поштучно. Заведены инвентарные номера: <b>${esc(result.instances_created.join(', '))}</b>.</p>
+      <p class="muted">Наклейте QR на каждую единицу, затем разместите на полку.</p>
+      <div class="row-actions">
+        <a class="btn btn-primary btn-lg" href="/labels?codes=${encodeURIComponent(codes)}" target="_blank" rel="noopener">Напечатать наклейки</a>
+        <a class="btn btn-lg" href="#/razmeshchenie">К размещению</a>
+      </div>`);
+  }
+}
+
+/* ========================================================== размещение */
+
+/** Поштучный товар в приёмке показываем экземплярами, а не строкой количества. */
+const bulkInZone = (zone) => zone.items.filter((i) => !zone.instances.some((x) => x.product_id === i.product_id));
+
+async function viewPlacement(root) {
+  await loadLocations();
+  const data = await api('/api/stock/receiving');
+  const shelves = state.locations.filter((l) => l.kind !== 'zone');
+  root.innerHTML = `
+    <div class="view-head"><h2>Размещение</h2></div>
+    <p class="view-hint">Что лежит в зоне приёмки. Выберите полку или коробку — или отсканируйте её QR.</p>
+    ${shelves.length ? '' : '<p class="empty">Сначала заведите полки и коробки в разделе <a href="#/mesta">«Места»</a>.</p>'}
+    <div class="stock-list">
+      ${data.instances.map((i) => `
+        <article class="stock-card">
+          <div class="stock-main">
+            <div class="stock-name">${esc(i.product_name)} <span class="code-chip">${esc(i.code)}</span></div>
+            <div class="stock-meta">поштучный учёт · ${esc(state.catPath[i.category_id] || 'без категории')}</div>
+          </div>
+          <div class="stock-actions"><button class="btn btn-primary btn-lg" data-place-inst="${i.id}">Разместить</button></div>
+        </article>`).join('')}
+      ${bulkInZone(data).map((i) => `
+        <article class="stock-card">
+          <div class="stock-main">
+            <div class="stock-name">${esc(i.name)}</div>
+            <div class="stock-meta">${esc(i.path)}</div>
+          </div>
+          <div class="stock-qty"><div class="big">${num(i.quantity)}</div><div class="sub">${esc(i.unit || '')} в приёмке</div></div>
+          <div class="stock-actions"><button class="btn btn-primary btn-lg" data-place="${i.product_id}">Разместить</button></div>
+        </article>`).join('')}
+    </div>
+    ${(data.items.length || data.instances.length) ? '' : '<p class="empty">Зона приёмки пуста — всё разложено.</p>'}`;
+
+  root.querySelectorAll('[data-place]').forEach((b) => b.addEventListener('click', () => {
+    placeForm(data.items.find((i) => String(i.product_id) === b.dataset.place));
+  }));
+  root.querySelectorAll('[data-place-inst]').forEach((b) => b.addEventListener('click', () => {
+    placeForm(null, data.instances.find((i) => String(i.id) === b.dataset.placeInst));
+  }));
+}
+
+/** Форма размещения. item — товар количеством, instance — экземпляр поштучно. */
+function placeForm(item, instance = null, fromLocationId = null) {
+  if (!requireActor()) return;
+  const categoryId = item ? item.category_id : instance.category_id;
+  openModal(instance ? 'Разместить экземпляр' : 'Разместить', `
+    <div class="stock-name">${esc(item ? item.name : instance.product_name)}
+      ${instance ? `<span class="code-chip">${esc(instance.code)}</span>` : ''}</div>
+    <div class="stock-meta" style="margin-bottom:14px">${esc(state.catPath[categoryId] || 'без категории')}</div>
+    ${item ? `<div class="form-row"><label>Сколько кладём</label>
+      <input type="number" id="f-qty" class="qty-input" min="0" step="any" value="${num(item.quantity)}"></div>` : ''}
+    <div class="form-row"><label>Куда</label>
+      <select id="f-loc">${locationOptions(categoryId, fromLocationId)}</select></div>
+    <div class="row-actions">
+      <button class="btn btn-lg" id="f-scan">Сканировать полку</button>
+      <button class="btn btn-primary btn-lg" id="f-ok">Положить</button>
+    </div>`);
+  el('f-scan').addEventListener('click', async () => {
+    const location = await pickLocationByScan();
+    if (location) { el('f-loc').value = location.id; toast(`Выбрано: ${location.code}`); }
+  });
+  el('f-ok').addEventListener('click', async () => {
+    const target = Number(el('f-loc').value);
+    if (!target) { toast('Выберите место'); return; }
+    try {
+      const result = await post('/api/stock/place', {
+        to_location_id: target,
+        from_location_id: fromLocationId,
+        product_id: item ? item.product_id : null,
+        quantity: item ? Number(el('f-qty').value || 0) : 1,
+        instance_id: instance ? instance.id : null,
+        ...actorPayload(),
+      });
+      closeModal();
+      toast(`Положено на ${result.to}`);
+      await route();
+    } catch (error) {
+      toast(explain(error));
+    }
+  });
+}
+
+/* ============================================================ хранение */
+
+async function viewStorage(root) {
+  await loadLocations();
+  const data = await api('/api/stock/overview');
+  root.innerHTML = `
+    <div class="view-head"><h2>Хранение</h2></div>
+    <div class="search-row"><input type="search" id="f-search" placeholder="Поиск по названию"></div>
+    <div id="storage-list"></div>`;
+
+  const draw = (query) => {
+    const q = query.trim().toLowerCase();
+    const rows = data.products.filter((r) => !q || r.name.toLowerCase().includes(q));
+    if (!rows.length) {
+      el('storage-list').innerHTML = `<p class="empty">${data.products.length ? 'Ничего не нашлось.' : 'На складе пока пусто.'}</p>`;
+      return;
+    }
+    let html = '';
+    let lastCategory = null;
+    let lastSub = null;
+    for (const row of rows) {
+      if (row.category !== lastCategory) {
+        html += `<div class="group-title">${esc(row.category)}</div>`;
+        lastCategory = row.category;
+        lastSub = null;
+      }
+      if (row.subcategory && row.subcategory !== lastSub) {
+        html += `<div class="subgroup-title">${esc(row.subcategory)}</div>`;
+        lastSub = row.subcategory;
+      }
+      html += `
+        <article class="stock-card ${row.low ? 'low' : ''}" style="margin-bottom:8px">
+          <div class="stock-main">
+            <div class="stock-name">${esc(row.name)}${row.low ? '<span class="badge-low">мало</span>' : ''}</div>
+            <div class="place-chips">${row.places.map((p) =>
+              `<span class="place-chip">${esc(whereText(p.location_id, p.code))} · <b>${num(p.quantity)}</b></span>`).join('')}</div>
+          </div>
+          <div class="stock-qty"><div class="big">${num(row.total)}</div><div class="sub">${esc(row.unit || '')}${row.min_stock ? ` · мин. ${num(row.min_stock)}` : ''}</div></div>
+          <div class="stock-actions"><button class="btn btn-primary btn-lg" data-out="${row.product_id}">Выдать</button></div>
+        </article>`;
+    }
+    el('storage-list').innerHTML = html;
+    el('storage-list').querySelectorAll('[data-out]').forEach((b) => b.addEventListener('click', () => {
+      issueForm(data.products.find((r) => String(r.product_id) === b.dataset.out));
+    }));
+  };
+  draw('');
+  el('f-search').addEventListener('input', (event) => draw(event.target.value));
+}
+
+/** Выдача со склада без заявки — так разбирают расходники. */
+async function issueForm(product, presetLocationId = null) {
+  if (!requireActor()) return;
+  let instances = [];
+  if (product.serialized) {
+    instances = (await api(`/api/stock/instances?product_id=${product.product_id}`)).instances
+      .filter((i) => i.status === 'stock');
+  }
+  // принятое до обновления лежит без инвентарных номеров — его выдаём количеством
+  const byInstance = instances.length > 0;
+  openModal('Выдача со склада', `
+    <div class="stock-name">${esc(product.name)}</div>
+    <div class="stock-meta" style="margin-bottom:14px">всего ${num(product.total)} ${esc(product.unit || '')}</div>
+    ${byInstance ? `
+      <div class="form-row"><label>Какой экземпляр</label>
+        <div class="pick-list">${instances.map((i, index) => `
+          <label><input type="radio" name="f-inst" value="${i.id}" ${index === 0 ? 'checked' : ''}>
+            <span class="code-chip">${esc(i.code)}</span> <span class="muted">${esc(whereText(i.location_id, i.location_code))}</span></label>`).join('')}</div></div>`
+    : `
+      <div class="form-row"><label>Откуда</label>
+        <select id="f-from">${product.places.map((p) =>
+          `<option value="${p.location_id}" ${p.location_id === presetLocationId ? 'selected' : ''}>${esc(whereText(p.location_id, p.code))} · ${esc(p.name)} — ${num(p.quantity)}</option>`).join('')}</select></div>
+      <div class="form-row"><label>Сколько</label>
+        <input type="number" id="f-qty" class="qty-input" min="0" step="any" value="1"></div>`}
+    <div class="form-row"><label>Кому</label><select id="f-to">${employeeOptions('')}</select></div>
+    <div class="form-row"><label>Если нет в списке — впишите</label><input type="text" id="f-to-other" placeholder="ФИО или отделение"></div>
+    <div class="form-row"><label>Примечание</label><input type="text" id="f-note"></div>
+    <button class="btn btn-primary btn-lg btn-block" id="f-ok">Выдать</button>`);
+
+  el('f-ok').addEventListener('click', async () => {
+    const payload = { ...actorPayload(), ...recipientFrom('f-to', 'f-to-other'), note: el('f-note').value.trim() };
+    if (byInstance) {
+      const chosen = el('modal-body').querySelector('input[name="f-inst"]:checked');
+      if (!chosen) { toast('Выберите экземпляр'); return; }
+      payload.instance_id = Number(chosen.value);
+    } else {
+      payload.product_id = product.product_id;
+      payload.location_id = Number(el('f-from').value);
+      payload.quantity = Number(el('f-qty').value || 0);
+    }
+    try {
+      await post('/api/stock/issue', payload);
+      closeModal();
+      toast('Выдано');
+      await route();
+    } catch (error) {
+      toast(explain(error));
+    }
+  });
+}
+
+/* ================================================= выдача по заявкам */
+
+async function viewIssue(root) {
+  const data = await api('/api/stock/queue?kind=on_hand');
+  root.innerHTML = `
+    <div class="view-head"><h2>Выдача по заявкам</h2></div>
+    <p class="view-hint">Принятые позиции, которые ещё не отдали заказчику. Когда выдано всё по заявке — она закрывается сама.</p>
+    <div class="stock-list">${data.items.map((row) => requestCard(row, 'out')).join('')}</div>
+    ${data.items.length ? '' : '<p class="empty">Всё выдано.</p>'}`;
+  const rows = Object.fromEntries(data.items.map((r) => [r.id, r]));
+  root.querySelectorAll('[data-issue]').forEach((b) => b.addEventListener('click', () => issueByRequestForm(rows[b.dataset.issue])));
+}
+
+async function issueByRequestForm(row) {
+  if (!requireActor()) return;
+  const instances = (await api(`/api/stock/instances?item_id=${row.id}`)).instances.filter((i) => i.status === 'stock');
+  const serialized = instances.length > 0;
+  openModal('Выдача по заявке', `
+    <div class="stock-name">${esc(row.name)}</div>
+    <div class="stock-meta" style="margin-bottom:14px">заявка №${row.request_id} · на складе ${num(row.on_hand)} ${esc(row.qty_unit || '')}</div>
+    ${serialized ? `
+      <div class="form-row"><label>Какие экземпляры</label>
+        <div class="pick-list">${instances.map((i) => `
+          <label><input type="checkbox" class="check" value="${i.id}" checked>
+            <span class="code-chip">${esc(i.code)}</span> <span class="muted">${esc(whereText(i.location_id, i.location_code))}</span></label>`).join('')}</div></div>`
+    : `<div class="form-row"><label>Сколько</label>
+        <input type="number" id="f-qty" class="qty-input" min="0" step="any" value="${num(row.on_hand)}"></div>`}
+    <div class="form-row"><label>Кому выдали</label><select id="f-to">${employeeOptions(row.author_name)}</select></div>
+    <div class="form-row"><label>Если нет в списке — впишите</label><input type="text" id="f-to-other" placeholder="ФИО"></div>
+    <div class="form-row"><label>Примечание</label><input type="text" id="f-note"></div>
+    <div class="row-actions">
+      <button class="btn btn-primary btn-lg" id="f-ok">Выдать</button>
+      <button class="btn btn-lg" id="f-close">Выдать и закрыть позицию</button>
+    </div>`);
+  const submit = async (close) => {
+    const payload = {
+      kind: 'out', item_id: row.id, close, note: el('f-note').value.trim(),
+      ...actorPayload(), ...recipientFrom('f-to', 'f-to-other'),
+    };
+    if (serialized) {
+      payload.instance_ids = [...el('modal-body').querySelectorAll('.check:checked')].map((c) => Number(c.value));
+      payload.quantity = payload.instance_ids.length;
+      if (!payload.quantity) { toast('Отметьте хотя бы один экземпляр'); return; }
+    } else {
+      payload.quantity = Number(el('f-qty').value || 0);
+    }
+    const result = await post('/api/stock/movement', payload);
+    closeModal();
+    toast(result.request_completed ? 'Выдано · заявка закрыта' : 'Выдано');
+    await route();
+  };
+  el('f-ok').addEventListener('click', () => submit(false));
+  el('f-close').addEventListener('click', () => submit(true));
+}
+
+/* ============================================================== сканер */
+
+async function viewScan(root) {
+  await loadLocations();
+  root.innerHTML = `
+    <div class="view-head"><h2>Сканер</h2></div>
+    ${scannerHtml('main')}
+    <div class="scan-result" id="scan-result"></div>`;
+  bindScanner('main', (text) => showScanned(text));
+  if (state.arg) showScanned(state.arg);
+}
+
+async function showScanned(text) {
+  const box = el('scan-result');
+  if (!box) return;
+  box.innerHTML = '<p class="muted">Ищу…</p>';
+  let found;
+  try {
+    found = await api(`/api/stock/resolve?code=${encodeURIComponent(text)}`);
+  } catch (error) {
+    box.innerHTML = `<p class="empty">Код «${esc(text)}» не найден.</p>`;
+    return;
+  }
+  if (found.type === 'shelf' || found.type === 'box' || found.type === 'zone') return renderLocationCard(box, found.details);
+  if (found.type === 'instance') return renderInstanceCard(box, found.details);
+  if (found.type === 'position') return renderPositionCard(box, found.details);
+}
+
+function renderLocationCard(box, details) {
+  const loc = details.location;
+  const kind = loc.kind === 'box' ? 'Коробка' : loc.kind === 'zone' ? 'Зона' : 'Полка';
+  const purpose = loc.category_ids.map((id) => state.catPath[id]).filter(Boolean).join(', ');
+  box.innerHTML = `
+    <div class="scan-card">
+      <div class="scan-kind">${kind} <span class="code-chip">${esc(loc.code)}</span></div>
+      <h3>${esc(loc.name)}</h3>
+      ${purpose ? `<div class="purpose">Хранится: ${esc(purpose)}</div>` : ''}
+      <div class="row-actions" style="margin-top:12px">
+        ${loc.kind !== 'zone' ? '<button class="btn btn-primary btn-lg" id="s-put">Положить сюда из приёмки</button>' : ''}
+      </div>
+      <div class="scan-contents">
+        ${details.items.map((i) => `
+          <div class="scan-line">
+            <span>${esc(i.name)} — <b>${num(i.quantity)}</b> ${esc(i.unit || '')}</span>
+            <button class="btn" data-take="${i.product_id}">Выдать</button>
+          </div>`).join('')}
+        ${details.instances.map((i) => `
+          <div class="scan-line">
+            <span>${esc(i.product_name)} <span class="code-chip">${esc(i.code)}</span></span>
+            <button class="btn" data-take-inst="${i.id}">Выдать</button>
+          </div>`).join('')}
+        ${details.boxes.map((b) => `
+          <div class="scan-line"><span>Коробка ${esc(b.name)}</span>
+            <a class="btn" href="#/scan/${encodeURIComponent(b.code)}">${esc(b.code)}</a></div>`).join('')}
+        ${(details.items.length || details.instances.length || details.boxes.length) ? '' : '<p class="muted">Здесь пока ничего нет.</p>'}
+      </div>
     </div>`;
 
-  el('overlay').hidden = false;
-  el('qty').focus();
-  el('qty').select();
+  const put = el('s-put');
+  if (put) put.addEventListener('click', () => putHereForm(loc));
+  box.querySelectorAll('[data-take]').forEach((b) => b.addEventListener('click', () => {
+    const item = details.items.find((i) => String(i.product_id) === b.dataset.take);
+    issueForm({
+      product_id: item.product_id, name: item.name, unit: item.unit, total: item.quantity, serialized: false,
+      places: [{ location_id: loc.id, code: loc.code, name: loc.name, quantity: item.quantity }],
+    }, loc.id);
+  }));
+  box.querySelectorAll('[data-take-inst]').forEach((b) => b.addEventListener('click', () => {
+    const inst = details.instances.find((i) => String(i.id) === b.dataset.takeInst);
+    issueInstanceForm(inst);
+  }));
+}
 
-  const collect = (close) => {
+/** «Скан полки → положить сюда»: выбираем, что из приёмки кладём на эту полку. */
+async function putHereForm(location) {
+  if (!requireActor()) return;
+  const zone = await api('/api/stock/receiving');
+  const bulk = bulkInZone(zone);
+  if (!bulk.length && !zone.instances.length) { toast('Зона приёмки пуста'); return; }
+  openModal(`Положить на ${location.code}`, `
+    <div class="form-row"><label>Что кладём</label>
+      <select id="f-what">
+        ${zone.instances.map((i) => `<option value="i:${i.id}">${esc(i.code)} · ${esc(i.product_name)}</option>`).join('')}
+        ${bulk.map((i) => `<option value="p:${i.product_id}">${esc(i.name)} — в приёмке ${num(i.quantity)}</option>`).join('')}
+      </select></div>
+    <div class="form-row" id="f-qty-row"><label>Сколько</label>
+      <input type="number" id="f-qty" class="qty-input" min="0" step="any" value="1"></div>
+    <button class="btn btn-primary btn-lg btn-block" id="f-ok">Положить</button>`);
+  const sync = () => {
+    const [kind, id] = el('f-what').value.split(':');
+    el('f-qty-row').hidden = kind === 'i';
+    if (kind === 'p') el('f-qty').value = num(bulk.find((i) => String(i.product_id) === id).quantity);
+  };
+  el('f-what').addEventListener('change', sync);
+  sync();
+  el('f-ok').addEventListener('click', async () => {
+    const [kind, id] = el('f-what').value.split(':');
+    try {
+      await post('/api/stock/place', {
+        to_location_id: location.id,
+        product_id: kind === 'p' ? Number(id) : null,
+        instance_id: kind === 'i' ? Number(id) : null,
+        quantity: kind === 'p' ? Number(el('f-qty').value || 0) : 1,
+        ...actorPayload(),
+      });
+      closeModal();
+      toast(`Положено на ${location.code}`);
+      showScanned(location.code);
+    } catch (error) {
+      toast(explain(error));
+    }
+  });
+}
+
+function renderInstanceCard(box, inst) {
+  box.innerHTML = `
+    <div class="scan-card">
+      <div class="scan-kind">Экземпляр <span class="code-chip">${esc(inst.code)}</span></div>
+      <h3>${esc(inst.product_name)}</h3>
+      <div class="purpose">${inst.status === 'issued'
+        ? `Выдан${inst.issued_to ? `: ${esc(inst.issued_to)}` : ''}`
+        : `Лежит: ${esc(whereText(inst.location_id, inst.location_code) || '—')}${inst.location_name ? ` · ${esc(inst.location_name)}` : ''}`}</div>
+      ${inst.status === 'stock' ? `
+        <div class="row-actions" style="margin-top:12px">
+          <button class="btn btn-primary btn-lg" id="s-move">Переложить — скан полки</button>
+          <button class="btn btn-lg" id="s-out">Выдать</button>
+        </div>` : ''}
+    </div>`;
+  if (inst.status !== 'stock') return;
+  // механика как на Озоне: отсканировали товар — теперь сканируем полку
+  el('s-move').addEventListener('click', async () => {
+    if (!requireActor()) return;
+    const location = await pickLocationByScan();
+    if (!location) return;
+    try {
+      await post('/api/stock/place', { instance_id: inst.id, to_location_id: location.id, ...actorPayload() });
+      toast(`${inst.code} → ${location.code}`);
+      showScanned(inst.code);
+    } catch (error) {
+      toast(explain(error));
+    }
+  });
+  el('s-out').addEventListener('click', () => issueInstanceForm(inst));
+}
+
+function issueInstanceForm(inst) {
+  if (!requireActor()) return;
+  openModal('Выдача экземпляра', `
+    <div class="stock-name">${esc(inst.product_name)} <span class="code-chip">${esc(inst.code)}</span></div>
+    <div class="form-row" style="margin-top:14px"><label>Кому</label><select id="f-to">${employeeOptions('')}</select></div>
+    <div class="form-row"><label>Если нет в списке — впишите</label><input type="text" id="f-to-other"></div>
+    <div class="form-row"><label>Примечание</label><input type="text" id="f-note"></div>
+    <button class="btn btn-primary btn-lg btn-block" id="f-ok">Выдать</button>`);
+  el('f-ok').addEventListener('click', async () => {
+    try {
+      await post('/api/stock/issue', {
+        instance_id: inst.id, note: el('f-note').value.trim(),
+        ...actorPayload(), ...recipientFrom('f-to', 'f-to-other'),
+      });
+      closeModal();
+      toast('Выдано');
+      if (state.view === 'scan') showScanned(inst.code); else await route();
+    } catch (error) {
+      toast(explain(error));
+    }
+  });
+}
+
+function renderPositionCard(box, item) {
+  box.innerHTML = `
+    <div class="scan-card">
+      <div class="scan-kind">Позиция заявки <span class="code-chip">${esc(item.stock_code)}</span></div>
+      <h3>${esc(item.name)}</h3>
+      <div class="purpose">заявка №${item.request_id} · заказано ${item.qty_number !== null ? num(item.qty_number) : '—'} ${esc(item.qty_unit || '')}
+        · принято ${num(item.received)} · выдано ${num(item.issued)}</div>
+      <div class="row-actions" style="margin-top:12px">
+        ${!item.received_done ? '<button class="btn btn-primary btn-lg" id="s-in">Принять</button>' : ''}
+        ${item.received_done && !item.issued_done ? '<a class="btn btn-primary btn-lg" href="#/vydacha">К выдаче</a>' : ''}
+      </div>
+    </div>`;
+  const receiveBtn = el('s-in');
+  if (receiveBtn) receiveBtn.addEventListener('click', () => receiveForm(item));
+}
+
+/* =============================================================== места */
+
+async function viewLocations(root) {
+  await loadLocations();
+  const shelves = state.locations.filter((l) => l.kind === 'shelf');
+  const boxes = state.locations.filter((l) => l.kind === 'box');
+  const purpose = (l) => l.category_ids.map((id) => state.catPath[id]).filter(Boolean).join(', ');
+  const counts = (l) => [l.products ? `товаров: ${l.products}` : '', l.instances ? `экземпляров: ${l.instances}` : '']
+    .filter(Boolean).join(' · ') || 'пусто';
+
+  root.innerHTML = `
+    <div class="view-head">
+      <h2>Места хранения</h2>
+      <button class="btn" id="m-print" disabled>Наклейки на выбранные</button>
+      <button class="btn" id="m-add-box">+ Коробка</button>
+      <button class="btn btn-primary" id="m-add-shelf">+ Полка</button>
+    </div>
+    <p class="view-hint">У каждой полки и коробки свой QR. Назначьте полке категории — при размещении она будет предлагаться первой.</p>
+    <div class="stock-list">
+      ${shelves.map((s) => `
+        <div class="shelf-card">
+          <div class="shelf-head">
+            <input type="checkbox" class="check" data-sel="${s.id}">
+            <span class="code-chip">${esc(s.code)}</span>
+            <span class="shelf-name">${esc(s.name)}</span>
+            <span class="muted" style="font-size:13px">${counts(s)}</span>
+            <span class="spacer"></span>
+            <a class="btn" href="#/scan/${encodeURIComponent(s.code)}">Открыть</a>
+            <button class="btn" data-edit="${s.id}">Изменить</button>
+          </div>
+          ${purpose(s) ? `<div class="purpose">Хранится: ${esc(purpose(s))}</div>` : '<div class="purpose">Назначение не задано</div>'}
+          ${boxes.filter((b) => b.parent_id === s.id).length ? `
+            <div class="shelf-boxes">${boxes.filter((b) => b.parent_id === s.id).map((b) => `
+              <div class="box-row">
+                <input type="checkbox" class="check" data-sel="${b.id}">
+                <span class="code-chip">${esc(b.code)}</span>
+                <span>${esc(b.name)}</span>
+                <span class="muted" style="font-size:13px">${counts(b)}</span>
+                <span class="spacer"></span>
+                <a class="btn" href="#/scan/${encodeURIComponent(b.code)}">Открыть</a>
+                <button class="btn" data-edit="${b.id}">Изменить</button>
+              </div>`).join('')}</div>` : ''}
+        </div>`).join('')}
+      ${boxes.filter((b) => !b.parent_id).map((b) => `
+        <div class="shelf-card">
+          <div class="shelf-head">
+            <input type="checkbox" class="check" data-sel="${b.id}">
+            <span class="code-chip">${esc(b.code)}</span>
+            <span class="shelf-name">${esc(b.name)}</span>
+            <span class="muted" style="font-size:13px">коробка без полки · ${counts(b)}</span>
+            <span class="spacer"></span>
+            <button class="btn" data-edit="${b.id}">Изменить</button>
+          </div>
+        </div>`).join('')}
+    </div>
+    ${shelves.length || boxes.length ? '' : '<p class="empty">Мест пока нет. Начните с полок: «+ Полка».</p>'}`;
+
+  const selected = () => [...root.querySelectorAll('[data-sel]:checked')].map((c) => c.dataset.sel);
+  root.querySelectorAll('[data-sel]').forEach((c) => c.addEventListener('change', () => {
+    el('m-print').disabled = !selected().length;
+  }));
+  el('m-print').addEventListener('click', () => {
+    window.open(`/labels?locations=${selected().join(',')}`, '_blank', 'noopener');
+  });
+  el('m-add-shelf').addEventListener('click', () => locationForm('shelf'));
+  el('m-add-box').addEventListener('click', () => locationForm('box'));
+  root.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => {
+    const loc = state.locations.find((l) => String(l.id) === b.dataset.edit);
+    locationForm(loc.kind, loc);
+  }));
+}
+
+function locationForm(kind, existing = null) {
+  const shelves = state.locations.filter((l) => l.kind === 'shelf');
+  const chosen = existing ? existing.category_ids : [];
+  openModal(existing ? `Изменить ${existing.code}` : (kind === 'shelf' ? 'Новая полка' : 'Новая коробка'), `
+    <div class="form-row"><label>Название</label>
+      <input type="text" id="f-name" value="${esc(existing ? existing.name : '')}"
+        placeholder="${kind === 'shelf' ? 'например: Стеллаж 2, полка 3' : 'например: Салфетки для обработки'}"></div>
+    ${kind === 'box' ? `<div class="form-row"><label>На какой полке стоит</label>
+      <select id="f-parent"><option value="">— не на полке —</option>
+        ${shelves.map((s) => `<option value="${s.id}" ${existing && existing.parent_id === s.id ? 'selected' : ''}>${esc(s.code)} · ${esc(s.name)}</option>`).join('')}
+      </select></div>` : ''}
+    <div class="form-row"><label>Что здесь хранится (можно несколько — Ctrl/Cmd + клик)</label>
+      <select id="f-cats" multiple>
+        ${state.categories.map((top) => `
+          <optgroup label="${esc(top.name)}">
+            <option value="${top.id}" ${chosen.includes(top.id) ? 'selected' : ''}>${esc(top.name)} — весь раздел</option>
+            ${top.children.map((c) => `<option value="${c.id}" ${chosen.includes(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+          </optgroup>`).join('')}
+      </select></div>
+    <button class="btn btn-primary btn-lg btn-block" id="f-ok">${existing ? 'Сохранить' : 'Создать'}</button>`);
+
+  el('f-ok').addEventListener('click', async () => {
+    const name = el('f-name').value.trim();
+    if (!name) { toast('Введите название'); return; }
     const payload = {
       kind,
-      item_id: itemId,
-      quantity: Number(el('qty').value || 0),
-      close,
-      note: el('note').value.trim(),
-      actor_name: state.actor.full_name,
-      actor_employee_id: state.actor.id,
+      name,
+      category_ids: [...el('f-cats').selectedOptions].map((o) => Number(o.value)),
     };
-    if (kind === 'out') {
-      const chosen = el('recipient').value;
-      const other = el('recipient-other').value.trim();
-      if (chosen) {
-        const person = state.employees.find((e) => String(e.id) === chosen);
-        payload.recipient_employee_id = person.id;
-        payload.recipient_name = person.full_name;
-      } else if (other) {
-        payload.recipient_name = other;
-      }
-    }
-    return payload;
+    if (kind === 'box') payload.parent_id = el('f-parent').value ? Number(el('f-parent').value) : null;
+    const result = existing
+      ? await post(`/api/stock/locations/${existing.id}`, payload)
+      : await post('/api/stock/locations', payload);
+    closeModal();
+    toast(existing ? 'Сохранено' : `Создано: ${result.location.code}`);
+    await route();
+  });
+}
+
+/* =========================================================== QR-наклейки */
+
+async function viewQr(root) {
+  await loadLocations();
+  const instances = (await api('/api/stock/instances')).instances.filter((i) => i.status === 'stock');
+  const places = state.locations.filter((l) => l.kind !== 'zone');
+  root.innerHTML = `
+    <div class="view-head"><h2>Генератор QR-наклеек</h2>
+      <button class="btn btn-primary" id="q-print" disabled>Напечатать выбранное</button></div>
+    <p class="view-hint">Лист А4 под самоклейку 70×37 мм. В QR зашита ссылка — её откроет и обычная камера телефона.</p>
+
+    <div class="group-title">Полки и коробки</div>
+    <div class="pick-list" style="max-height:none">
+      ${places.map((l) => `<label><input type="checkbox" class="check" data-code="${esc(l.code)}">
+        <span class="code-chip">${esc(l.code)}</span> ${esc(l.name)}</label>`).join('') || '<p class="muted">Мест пока нет — создайте их в разделе «Места».</p>'}
+    </div>
+
+    <div class="group-title">Крупный товар на складе</div>
+    <div class="pick-list" style="max-height:none">
+      ${instances.map((i) => `<label><input type="checkbox" class="check" data-code="${esc(i.code)}">
+        <span class="code-chip">${esc(i.code)}</span> ${esc(i.product_name)}</label>`).join('') || '<p class="muted">Поштучного товара пока нет.</p>'}
+    </div>
+
+    <div class="group-title">Позиции заявки</div>
+    <div class="inline-row" style="max-width:420px">
+      <input type="number" id="q-request" placeholder="номер заявки, например 47">
+      <a class="btn" id="q-request-go" style="flex:0" target="_blank" rel="noopener">Наклейки заявки</a>
+    </div>`;
+
+  const chosen = () => [...root.querySelectorAll('[data-code]:checked')].map((c) => c.dataset.code);
+  root.querySelectorAll('[data-code]').forEach((c) => c.addEventListener('change', () => {
+    el('q-print').disabled = !chosen().length;
+  }));
+  el('q-print').addEventListener('click', () => {
+    window.open(`/labels?codes=${encodeURIComponent(chosen().join(','))}`, '_blank', 'noopener');
+  });
+  const go = el('q-request-go');
+  const sync = () => { go.href = `/labels?request=${encodeURIComponent(el('q-request').value || '')}`; };
+  el('q-request').addEventListener('input', sync);
+  sync();
+}
+
+/* ============================================================== товары */
+
+async function viewProducts(root) {
+  const products = (await api('/api/stock/products')).products;
+  const isAdmin = state.role === 'admin';
+  root.innerHTML = `
+    <div class="view-head"><h2>Товары и категории</h2></div>
+    <div class="search-row"><input type="search" id="p-search" placeholder="Поиск по названию"></div>
+    <table class="products-table">
+      <thead><tr><th>Товар</th><th>Категория</th><th>Учёт</th><th>Мин. остаток</th></tr></thead>
+      <tbody id="p-rows"></tbody>
+    </table>
+    ${products.length ? '' : '<p class="empty">Товаров пока нет — они появятся после первой приёмки.</p>'}
+    ${isAdmin ? `
+      <div class="group-title" style="margin-top:28px">Словарь автоматической разбивки</div>
+      <p class="view-hint">Слова через запятую. <code>перчат</code> — начало слова, <code>=чай</code> — слово целиком,
+        <code>перчат+нитрил</code> — нужны оба. Изменения сразу применяются к товарам без категории.</p>
+      <div id="kw-list"></div>` : ''}`;
+
+  const draw = (query) => {
+    const q = query.trim().toLowerCase();
+    el('p-rows').innerHTML = products.filter((p) => !q || p.name.toLowerCase().includes(q)).map((p) => `
+      <tr>
+        <td>${esc(p.name)}</td>
+        <td><select data-cat="${p.id}">${categoryOptions(p.category_id)}</select>
+          ${p.category_manual ? '' : '<div class="auto-tag">определена автоматически</div>'}</td>
+        <td><select data-ser="${p.id}">
+          <option value="" ${p.serialized_override === null ? 'selected' : ''}>как у категории (${p.serialized ? 'поштучно' : 'количеством'})</option>
+          <option value="1" ${p.serialized_override === true ? 'selected' : ''}>поштучно</option>
+          <option value="0" ${p.serialized_override === false ? 'selected' : ''}>количеством</option>
+        </select></td>
+        <td><input type="number" class="num" min="0" step="any" data-min="${p.id}" value="${p.min_stock ?? ''}"></td>
+      </tr>`).join('');
+    el('p-rows').querySelectorAll('[data-cat]').forEach((s) => s.addEventListener('change', async () => {
+      await post(`/api/stock/products/${s.dataset.cat}`, { category_id: s.value ? Number(s.value) : null });
+      toast('Категория сохранена — запомнил за товаром');
+    }));
+    el('p-rows').querySelectorAll('[data-ser]').forEach((s) => s.addEventListener('change', async () => {
+      await post(`/api/stock/products/${s.dataset.ser}`, { serialized: s.value === '' ? null : s.value === '1' });
+      toast('Способ учёта сохранён');
+    }));
+    el('p-rows').querySelectorAll('[data-min]').forEach((i) => i.addEventListener('change', async () => {
+      await post(`/api/stock/products/${i.dataset.min}`, { min_stock: i.value === '' ? null : Number(i.value) });
+      toast('Минимальный остаток сохранён');
+    }));
   };
+  draw('');
+  el('p-search').addEventListener('input', (event) => draw(event.target.value));
 
-  el('do-move').addEventListener('click', () => send(collect(false)));
-  el('do-close').addEventListener('click', () => send(collect(true)));
-}
-
-function closeModal() {
-  el('overlay').hidden = true;
-  el('modal-body').innerHTML = '';
-  state.openItem = null;
-}
-
-el('modal-close').addEventListener('click', closeModal);
-el('overlay').addEventListener('click', (event) => {
-  if (event.target === el('overlay')) closeModal();
-});
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && !el('overlay').hidden) closeModal();
-});
-
-/* -------------------------------------------------- поиск по коду */
-
-el('scan').addEventListener('keydown', async (event) => {
-  if (event.key !== 'Enter') return;
-  const code = el('scan').value.trim();
-  if (!code) return;
-  el('scan').value = '';
-  try {
-    const found = await api(`/api/stock/find?code=${encodeURIComponent(code)}`);
-    const item = found.item;
-    // открываем ту вкладку, где позиция реально находится
-    state.tab = item.received_done ? 'on_hand' : 'pending';
-    document.querySelectorAll('.tab').forEach((t) =>
-      t.classList.toggle('active', t.dataset.tab === state.tab));
-    await load();
-    const row = state.rows.find((r) => r.id === item.id);
-    if (row) openForm(item.id, state.tab === 'pending' ? 'in' : 'out');
-    else toast(`Позиция ${code} уже закрыта`);
-  } catch (error) {
-    toast(`Код ${code} не найден`);
+  if (isAdmin) {
+    el('kw-list').innerHTML = state.categories.map((top) => top.children.map((c) => `
+      <div class="kw-row">
+        <div><b>${esc(top.name)}</b><br><span class="muted">${esc(c.name)}</span></div>
+        <textarea data-kw="${c.id}">${esc(c.keywords || '')}</textarea>
+        <button class="btn" data-kw-save="${c.id}">Сохранить</button>
+      </div>`).join('')).join('');
+    el('kw-list').querySelectorAll('[data-kw-save]').forEach((b) => b.addEventListener('click', async () => {
+      const id = b.dataset.kwSave;
+      await post(`/api/stock/categories/${id}/keywords`, {
+        keywords: el('kw-list').querySelector(`[data-kw="${id}"]`).value,
+      });
+      await loadCategories();
+      toast('Словарь обновлён');
+    }));
   }
-});
-
-/* ------------------------------------------------------------- старт */
-
-async function boot() {
-  await loadEmployees();
-  await load();
-  setInterval(() => { if (!el('app').hidden && el('overlay').hidden) load().catch(() => {}); }, 30000);
 }
 
-async function init() {
-  const meta = await fetch('/api/meta').then((r) => r.json()).catch(() => null);
-  if (!meta || !meta.user) { showLogin(); return; }
-  state.user = meta.user;
+/* ============================================================= история */
+
+async function viewHistory(root) {
+  const data = await api('/api/stock/history?limit=150');
+  const label = { in: 'Принято', out: 'Выдано', move: 'Перемещено', adjust: 'Инвентаризация' };
+  root.innerHTML = `
+    <div class="view-head"><h2>История</h2></div>
+    <div class="hist">${data.movements.map((m) => `
+      <div class="hist-row">
+        <span class="hist-kind ${esc(m.kind)}">${label[m.kind] || m.kind} ${num(m.quantity)}</span>
+        <span>${esc(m.item_name || '')}${m.instance_code ? ` <span class="code-chip">${esc(m.instance_code)}</span>` : ''}</span>
+        <span class="muted">${m.from_code ? esc(m.from_code) : ''}${m.from_code && m.to_code ? ' → ' : ''}${m.to_code ? esc(m.to_code) : ''}</span>
+        <span class="muted">${esc(m.actor_name)}${m.recipient_name ? ` → ${esc(m.recipient_name)}` : ''}</span>
+        <span class="hist-when">${esc(m.created_at)}</span>
+      </div>`).join('')}</div>
+    ${data.movements.length ? '' : '<p class="empty">Движений пока не было.</p>'}`;
+}
+
+/* =============================================================== старт */
+
+async function start(user, role) {
+  state.user = user;
+  state.role = role;
   el('login-screen').hidden = true;
   el('app').hidden = false;
-  el('user-chip').textContent = state.user;
-  await boot();
+  el('user-chip').textContent = user;
+  await Promise.all([loadEmployees(), loadCategories(), loadLocations()]);
+  await route();
 }
 
-init();
+(async () => {
+  const meta = await fetch('/api/meta').then((r) => r.json()).catch(() => null);
+  if (!meta || !meta.user) { showLogin(); return; }
+  await start(meta.user, meta.role);
+})();
+
+setInterval(() => {
+  const busy = !el('overlay').hidden || !el('scan-overlay').hidden || Scanner.stream || state.view === 'scan';
+  if (!el('app').hidden && !busy) refreshCounts().catch(() => {});
+}, 30000);

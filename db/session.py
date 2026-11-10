@@ -41,8 +41,13 @@ async def init_db() -> None:
     settings.media_dir.mkdir(parents=True, exist_ok=True)
     await migrate_items()
     async with Session() as session:
+        await migrate.seed_catalog(session)
+        await migrate.backfill_links(session)
         await migrate.backfill(session)
+        await migrate.backfill_locations(session)
     await seed_employees()
+    from db import repo  # локальный импорт: repo импортирует session
+    await repo.classify_unassigned_products()
     log.info("База готова: %s", settings.database_url)
 
 

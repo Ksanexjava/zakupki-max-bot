@@ -104,7 +104,7 @@ STOCK_ALLOWED_PREFIXES = (
 async def no_cache_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
     """Панель обновляется вместе с ботом — браузер не должен держать старый app.js."""
     response = await handler(request)
-    if request.path == "/" or request.path.startswith("/static/"):
+    if request.path in {"/", "/zayavki", "/sklad"} or request.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
     return response
 
@@ -129,10 +129,8 @@ async def auth_middleware(request: web.Request, handler: Any) -> web.StreamRespo
 # ---------------------------------------------------------------- хендлеры
 
 async def handle_index(request: web.Request) -> web.StreamResponse:
-    # кладовщику сразу открываем его экран
-    if current_role(request) == "stock":
-        raise web.HTTPFound("/sklad")
-    return web.FileResponse(STATIC_DIR / "index.html")
+    """Главная портала: плитки разделов. Что видно — зависит от роли."""
+    return web.FileResponse(STATIC_DIR / "home.html")
 
 
 async def handle_stock_page(request: web.Request) -> web.StreamResponse:
@@ -546,6 +544,8 @@ async def handle_stock_movement(request: web.Request) -> web.StreamResponse:
         recipient_employee_id=payload.get("recipient_employee_id") or None,
         note=str(payload.get("note", "")).strip(),
         close=bool(payload.get("close")),
+        from_location_id=int(payload["from_location_id"]) if payload.get("from_location_id") else None,
+        instance_ids=[int(i) for i in payload.get("instance_ids", [])] or None,
     )
     if result is None:
         return web.json_response({"error": "not_found"}, status=404)
@@ -570,6 +570,176 @@ async def handle_stock_movement(request: web.Request) -> web.StreamResponse:
     return web.json_response({"ok": True, **result})
 
 
+# ------------------------------------------------- места, остатки, категории
+
+async def _json(request: web.Request) -> dict:
+    try:
+        return await request.json()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _actor(request: web.Request, payload: dict) -> str:
+    return str(payload.get("actor_name", "")).strip() or (current_user(request) or "склад")
+
+
+async def handle_categories(request: web.Request) -> web.StreamResponse:
+    return web.json_response({"categories": await repo.list_categories()})
+
+
+async def handle_category_keywords(request: web.Request) -> web.StreamResponse:
+    if current_role(request) != "admin":
+        return web.json_response({"error": "forbidden"}, status=403)
+    payload = await _json(request)
+    ok = await repo.update_category_keywords(
+        int(request.match_info["category_id"]), str(payload.get("keywords", ""))
+    )
+    return web.json_response({"ok": ok}, status=200 if ok else 404)
+
+
+async def handle_products(request: web.Request) -> web.StreamResponse:
+    return web.json_response({"products": await repo.products_catalog()})
+
+
+async def handle_product_update(request: web.Request) -> web.StreamResponse:
+    payload = await _json(request)
+    kwargs: dict = {}
+    if "category_id" in payload:
+        kwargs["category_id"] = int(payload["category_id"]) if payload["category_id"] else None
+    if "serialized" in payload:
+        kwargs["serialized"] = None if payload["serialized"] is None else bool(payload["serialized"])
+    if "min_stock" in payload:
+        value = payload["min_stock"]
+        kwargs["min_stock"] = float(value) if value not in (None, "") else None
+    ok = await repo.update_product(int(request.match_info["product_id"]), **kwargs)
+    return web.json_response({"ok": ok}, status=200 if ok else 404)
+
+
+async def handle_locations(request: web.Request) -> web.StreamResponse:
+    return web.json_response({"locations": await repo.list_locations()})
+
+
+async def handle_location_create(request: web.Request) -> web.StreamResponse:
+    payload = await _json(request)
+    kind = str(payload.get("kind", "shelf"))
+    name = str(payload.get("name", "")).strip()
+    if kind not in {"shelf", "box"} or not name:
+        return web.json_response({"error": "bad_request"}, status=400)
+    location = await repo.create_location(
+        kind,
+        name,
+        parent_id=int(payload["parent_id"]) if payload.get("parent_id") else None,
+        category_ids=[int(c) for c in payload.get("category_ids", [])],
+        note=str(payload.get("note", "")),
+    )
+    return web.json_response({"ok": True, "location": location})
+
+
+async def handle_location_update(request: web.Request) -> web.StreamResponse:
+    payload = await _json(request)
+    location = await repo.update_location(
+        int(request.match_info["location_id"]),
+        name=payload.get("name"),
+        # 0 — «снять коробку с полки», None — не трогать
+        parent_id=int(payload["parent_id"] or 0) if "parent_id" in payload else None,
+        category_ids=[int(c) for c in payload["category_ids"]] if "category_ids" in payload else None,
+        note=payload.get("note"),
+        active=payload.get("active"),
+    )
+    if location is None:
+        return web.json_response({"error": "not_found"}, status=404)
+    return web.json_response({"ok": True, "location": location})
+
+
+async def handle_location_contents(request: web.Request) -> web.StreamResponse:
+    contents = await repo.location_contents(int(request.match_info["location_id"]))
+    if contents is None:
+        return web.json_response({"error": "not_found"}, status=404)
+    return web.json_response(contents)
+
+
+async def handle_overview(request: web.Request) -> web.StreamResponse:
+    return web.json_response({"products": await repo.stock_overview()})
+
+
+async def handle_receiving(request: web.Request) -> web.StreamResponse:
+    return web.json_response(await repo.receiving_queue())
+
+
+async def handle_place(request: web.Request) -> web.StreamResponse:
+    payload = await _json(request)
+    try:
+        result = await repo.place(
+            product_id=int(payload["product_id"]) if payload.get("product_id") else None,
+            quantity=float(payload.get("quantity") or 0),
+            instance_id=int(payload["instance_id"]) if payload.get("instance_id") else None,
+            to_location_id=int(payload["to_location_id"]),
+            from_location_id=int(payload["from_location_id"]) if payload.get("from_location_id") else None,
+            actor_name=_actor(request, payload),
+        )
+    except (KeyError, TypeError, ValueError):
+        return web.json_response({"error": "bad_request"}, status=400)
+    return web.json_response(result, status=200 if result.get("ok") else 400)
+
+
+async def handle_issue(request: web.Request) -> web.StreamResponse:
+    payload = await _json(request)
+    try:
+        result = await repo.issue_from_stock(
+            product_id=int(payload["product_id"]) if payload.get("product_id") else None,
+            quantity=float(payload.get("quantity") or 0),
+            location_id=int(payload["location_id"]) if payload.get("location_id") else None,
+            instance_id=int(payload["instance_id"]) if payload.get("instance_id") else None,
+            actor_name=_actor(request, payload),
+            actor_employee_id=payload.get("actor_employee_id") or None,
+            recipient_name=str(payload.get("recipient_name", "")).strip(),
+            recipient_employee_id=payload.get("recipient_employee_id") or None,
+            note=str(payload.get("note", "")).strip(),
+        )
+    except (TypeError, ValueError):
+        return web.json_response({"error": "bad_request"}, status=400)
+    return web.json_response(result, status=200 if result.get("ok") else 400)
+
+
+async def handle_resolve(request: web.Request) -> web.StreamResponse:
+    """Что за код отсканировали — и сразу всё, что нужно показать на экране."""
+    found = await repo.resolve_code(request.query.get("code", ""))
+    if found is None:
+        return web.json_response({"error": "not_found"}, status=404)
+    if found["type"] in {"shelf", "box", "zone"}:
+        found["details"] = await repo.location_contents(found["id"])
+    elif found["type"] == "instance":
+        found["details"] = await repo.get_instance(found["id"])
+    elif found["type"] == "position":
+        item = await repo.find_item_by_id(found["id"])
+        if item is not None:
+            item["instances"] = await repo.list_instances(item_id=found["id"])
+        found["details"] = item
+    return web.json_response(found)
+
+
+async def handle_instances(request: web.Request) -> web.StreamResponse:
+    item_id = request.query.get("item_id")
+    product_id = request.query.get("product_id")
+    rows = await repo.list_instances(
+        item_id=int(item_id) if item_id and item_id.isdigit() else None,
+        product_id=int(product_id) if product_id and product_id.isdigit() else None,
+    )
+    return web.json_response({"instances": rows})
+
+
+async def handle_scan_link(request: web.Request) -> web.StreamResponse:
+    """QR со ссылкой …/s/SH-01: открываем сканер склада сразу на этом коде."""
+    code = request.match_info["code"]
+    raise web.HTTPFound(f"/sklad#/scan/{code}")
+
+
+async def handle_requests_page(request: web.Request) -> web.StreamResponse:
+    if current_role(request) == "stock":
+        raise web.HTTPFound("/")
+    return web.FileResponse(STATIC_DIR / "index.html")
+
+
 async def handle_employees(request: web.Request) -> web.StreamResponse:
     return web.json_response({"employees": await repo.list_employees()})
 
@@ -591,32 +761,61 @@ async def handle_employee_add(request: web.Request) -> web.StreamResponse:
 
 
 async def handle_labels(request: web.Request) -> web.StreamResponse:
-    """Лист наклеек: /labels?request=12 или /labels?items=5,6,7."""
-    item_ids: list[int] = []
-    raw_items = request.query.get("items", "")
-    for chunk in raw_items.replace(";", ",").split(","):
-        if chunk.strip().isdigit():
-            item_ids.append(int(chunk.strip()))
+    """Лист наклеек.
 
-    rows: list[dict] = []
+    /labels?request=12          — все позиции заявки
+    /labels?items=5,6           — выбранные позиции
+    /labels?locations=2,3       — полки и коробки
+    /labels?instances=1,2       — экземпляры крупного товара
+    """
+    def ids(name: str) -> list[int]:
+        return [int(x) for x in request.query.get(name, "").replace(";", ",").split(",") if x.strip().isdigit()]
+
+    labels: list[dict] = []
+
     raw_request = request.query.get("request", "")
     if raw_request.isdigit():
         found = await repo.get_request(int(raw_request))
         if found is not None:
-            rows = [
-                {**repo.item_to_dict(item), "request_id": found.id} for item in found.items
-            ]
-    if item_ids:
-        rows = [row for row in rows if row["id"] in item_ids] if rows else []
-        if not rows:
-            for item_id in item_ids:
-                found = await repo.find_item_by_id(item_id)
-                if found is not None:
-                    rows.append(found)
-    if not rows:
-        return web.json_response({"error": "nothing_to_print"}, status=404)
+            for item in found.items:
+                labels.append(labels_page.position_label(repo.item_to_dict(item), found.id))
+    for item_id in ids("items"):
+        found = await repo.find_item_by_id(item_id)
+        if found is not None:
+            labels.append(labels_page.position_label(found, found["request_id"]))
 
-    return web.Response(text=labels_page.render(rows), content_type="text/html")
+    instance_ids = ids("instances")
+    location_ids = ids("locations")
+    for code in [c.strip() for c in request.query.get("codes", "").split(",") if c.strip()]:
+        found = await repo.resolve_code(code)
+        if found is None:
+            continue
+        if found["type"] == "instance":
+            instance_ids.append(found["id"])
+        elif found["type"] in {"shelf", "box"}:
+            location_ids.append(found["id"])
+        elif found["type"] == "position":
+            item = await repo.find_item_by_id(found["id"])
+            if item is not None:
+                labels.append(labels_page.position_label(item, item["request_id"]))
+    if location_ids:
+        tree = await repo.list_categories()
+        categories = {top["id"]: top["name"] for top in tree} | {
+            child["id"]: f"{top['name']} → {child['name']}" for top in tree for child in top["children"]
+        }
+        locations = {loc["id"]: loc for loc in await repo.list_locations()}
+        for location_id in location_ids:
+            if location_id in locations:
+                labels.append(labels_page.location_label(locations[location_id], categories, locations))
+
+    for instance_id in instance_ids:
+        instance = await repo.get_instance(instance_id)
+        if instance is not None:
+            labels.append(labels_page.instance_label(instance))
+
+    if not labels:
+        return web.json_response({"error": "nothing_to_print"}, status=404)
+    return web.Response(text=labels_page.render(labels), content_type="text/html")
 
 
 async def handle_media(request: web.Request) -> web.StreamResponse:
@@ -634,7 +833,9 @@ def create_app(bot: Any = None) -> web.Application:
     app.add_routes(
         [
             web.get("/", handle_index),
+            web.get("/zayavki", handle_requests_page),
             web.get("/sklad", handle_stock_page),
+            web.get("/s/{code}", handle_scan_link),
             web.get("/healthz", handle_health),
             web.get("/api/meta", handle_meta),
             web.post("/api/login", handle_login),
@@ -652,6 +853,20 @@ def create_app(bot: Any = None) -> web.Application:
             web.get("/api/stock/history", handle_stock_history),
             web.get("/api/stock/find", handle_stock_find),
             web.post("/api/stock/movement", handle_stock_movement),
+            web.get("/api/stock/categories", handle_categories),
+            web.post(r"/api/stock/categories/{category_id:\d+}/keywords", handle_category_keywords),
+            web.get("/api/stock/products", handle_products),
+            web.post(r"/api/stock/products/{product_id:\d+}", handle_product_update),
+            web.get("/api/stock/locations", handle_locations),
+            web.post("/api/stock/locations", handle_location_create),
+            web.get(r"/api/stock/locations/{location_id:\d+}", handle_location_contents),
+            web.post(r"/api/stock/locations/{location_id:\d+}", handle_location_update),
+            web.get("/api/stock/overview", handle_overview),
+            web.get("/api/stock/receiving", handle_receiving),
+            web.post("/api/stock/place", handle_place),
+            web.post("/api/stock/issue", handle_issue),
+            web.get("/api/stock/resolve", handle_resolve),
+            web.get("/api/stock/instances", handle_instances),
             web.get("/api/employees", handle_employees),
             web.post("/api/employees", handle_employee_add),
             web.post(r"/api/requests/{request_id:\d+}/attachments", handle_upload),

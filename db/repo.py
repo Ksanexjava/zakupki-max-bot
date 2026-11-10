@@ -6,13 +6,18 @@ from sqlalchemy import func, inspect as sa_inspect, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.statuses import DEFAULT_STATUS
+from core.categories import classify, parse_keywords
 from core.quantities import normalize_name, parse_quantity
 from db.migrate import make_stock_code
 from db.models import (
     Admin,
     Attachment,
+    Category,
     Employee,
+    Instance,
     Item,
+    Location,
+    LocationCategory,
     Movement,
     Product,
     Request,
@@ -479,7 +484,13 @@ async def _get_or_create_product(session: AsyncSession, name: str, unit: str) ->
     ).scalar_one_or_none()
     if product is not None:
         return product
-    product = Product(name=name.strip(), norm_name=key, unit=unit or "")
+    rules = await _load_rules(session)
+    product = Product(
+        name=name.strip(),
+        norm_name=key,
+        unit=unit or "",
+        category_id=classify(name, rules),
+    )
     session.add(product)
     await session.flush()
     return product
@@ -584,11 +595,17 @@ async def record_movement(
     recipient_employee_id: int | None = None,
     note: str = "",
     close: bool = False,
+    from_location_id: int | None = None,
+    instance_ids: list[int] | None = None,
 ) -> dict[str, Any] | None:
-    """Проводит приход или выдачу.
+    """Проводит приход или выдачу по позиции заявки.
 
     close=True закрывает позицию целиком («принял всё», «выдал всё») — так
     склад может закрыть позицию, даже если количество не было числом.
+
+    Приход всегда падает в зону приёмки — оттуда товар раскладывают по полкам.
+    Для крупного товара (поштучный учёт) на каждую принятую единицу
+    заводится экземпляр со своим кодом.
     """
     if kind not in {"in", "out"}:
         return None
@@ -596,6 +613,7 @@ async def record_movement(
     arrived = completed = False
     request_id: int | None = None
     movement_id: int | None = None
+    created_instances: list[str] = []
 
     async with Session() as session:
         item = await session.get(Item, item_id)
@@ -607,20 +625,70 @@ async def record_movement(
             product = await _get_or_create_product(session, item.name, item.qty_unit)
             item.product_id = product.id
 
-        movement = Movement(
-            item_id=item.id,
-            product_id=item.product_id,
-            kind=kind,
-            quantity=float(quantity or 0),
-            actor_name=actor_name,
-            actor_employee_id=actor_employee_id,
-            recipient_name=recipient_name,
-            recipient_employee_id=recipient_employee_id,
-            note=note,
-        )
-        session.add(movement)
-        await session.flush()
-        movement_id = movement.id
+        product = await session.get(Product, item.product_id)
+        serialized = await _is_serialized(session, product) if product else False
+        zone = await receiving_zone(session)
+
+        if kind == "in":
+            movement = await _write_move(
+                session, kind="in", product_id=item.product_id, quantity=float(quantity or 0),
+                actor_name=actor_name, actor_employee_id=actor_employee_id,
+                to_location_id=zone.id, item_id=item.id, note=note,
+            )
+            movement_id = movement.id
+            if serialized:
+                for _ in range(int(round(float(quantity or 0)))):
+                    instance = Instance(
+                        code=await _next_code(session, "IN", 5, Instance, Instance.code),
+                        product_id=item.product_id,
+                        item_id=item.id,
+                        location_id=zone.id,
+                    )
+                    session.add(instance)
+                    await session.flush()
+                    created_instances.append(instance.code)
+        else:
+            if serialized:
+                # выдаём конкретные экземпляры: выбранные вручную или самые ранние
+                stmt = select(Instance).where(
+                    Instance.item_id == item.id, Instance.status == "stock"
+                ).order_by(Instance.id)
+                if instance_ids:
+                    stmt = stmt.where(Instance.id.in_(instance_ids))
+                pool = (await session.execute(stmt)).scalars().all()
+                take = pool if instance_ids else pool[: int(round(float(quantity or 0)))]
+                for instance in take:
+                    movement = await _write_move(
+                        session, kind="out", product_id=item.product_id, quantity=1,
+                        actor_name=actor_name, actor_employee_id=actor_employee_id,
+                        from_location_id=instance.location_id, instance_id=instance.id,
+                        item_id=item.id, recipient_name=recipient_name,
+                        recipient_employee_id=recipient_employee_id, note=note,
+                    )
+                    movement_id = movement.id
+                    instance.status = "issued"
+                    instance.issued_to = recipient_name
+                    instance.issued_at = utcnow()
+                    instance.location_id = None
+                quantity = len(take)
+            else:
+                if from_location_id is None:
+                    # берём оттуда, где этого товара больше всего; зона приёмки — первой
+                    balances = await _balances(session)
+                    places = sorted(
+                        ((loc, qty) for (pid, loc), qty in balances.items()
+                         if pid == item.product_id and qty > 0),
+                        key=lambda pair: (pair[0] != zone.id, -pair[1]),
+                    )
+                    from_location_id = places[0][0] if places else zone.id
+                movement = await _write_move(
+                    session, kind="out", product_id=item.product_id, quantity=float(quantity or 0),
+                    actor_name=actor_name, actor_employee_id=actor_employee_id,
+                    from_location_id=from_location_id, item_id=item.id,
+                    recipient_name=recipient_name, recipient_employee_id=recipient_employee_id,
+                    note=note,
+                )
+                movement_id = movement.id
 
         # суммы считаем запросом, а не через связь: так не зависим от того,
         # успела ли коллекция позиции обновиться после вставки
@@ -674,6 +742,7 @@ async def record_movement(
 
     return {
         "movement_id": movement_id,
+        "instances_created": created_instances,
         "item": item_to_dict(fresh_item) if fresh_item is not None else None,
         "request": to_dict(fresh_request) if fresh_request is not None else None,
         "request_arrived": arrived,
@@ -693,14 +762,31 @@ async def movements_history(limit: int = 100) -> list[dict[str, Any]]:
     stmt = select(Movement).order_by(Movement.id.desc()).limit(limit)
     async with Session() as session:
         movements = (await session.execute(stmt)).scalars().all()
-        item_ids = {m.item_id for m in movements}
+        item_ids = {m.item_id for m in movements if m.item_id}
         items = {
             item.id: item
             for item in (
                 await session.execute(select(Item).where(Item.id.in_(item_ids)))
             ).scalars().all()
-        }
-        return [movement_to_dict(m, items.get(m.item_id)) for m in movements]
+        } if item_ids else {}
+        products = {p.id: p for p in (await session.execute(select(Product))).scalars().all()}
+        locations = {l.id: l for l in (await session.execute(select(Location))).scalars().all()}
+        instances = {i.id: i for i in (await session.execute(select(Instance))).scalars().all()}
+
+    rows = []
+    for movement in movements:
+        data = movement_to_dict(movement, items.get(movement.item_id))
+        product = products.get(movement.product_id)
+        if not data.get("item_name") and product is not None:
+            data["item_name"] = product.name
+        source = locations.get(movement.from_location_id)
+        target = locations.get(movement.to_location_id)
+        data["from_code"] = source.code if source else ""
+        data["to_code"] = target.code if target else ""
+        instance = instances.get(movement.instance_id)
+        data["instance_code"] = instance.code if instance else ""
+        rows.append(data)
+    return rows
 
 
 async def mark_items_bought(request_id: int) -> int:
@@ -718,3 +804,619 @@ async def mark_items_bought(request_id: int) -> int:
         if changed:
             await session.commit()
         return changed
+
+
+# ====================================================== КАТЕГОРИИ
+
+async def _load_rules(session: AsyncSession) -> list:
+    """Правила классификатора из справочника в базе, в порядке дерева."""
+    categories = (await session.execute(select(Category))).scalars().all()
+    by_id = {c.id: c for c in categories}
+
+    def sort_key(category: Category) -> tuple:
+        parent = by_id.get(category.parent_id) if category.parent_id else None
+        return (parent.position if parent else category.position,
+                category.position if parent else 0)
+
+    rules = []
+    for order, category in enumerate(sorted(categories, key=sort_key)):
+        rules += parse_keywords(category.id, category.keywords, order)
+    return rules
+
+
+async def classify_unassigned_products() -> int:
+    """Раскладывает по категориям товары, которым категорию ещё не назначили."""
+    async with Session() as session:
+        rules = await _load_rules(session)
+        products = (
+            await session.execute(
+                select(Product).where(
+                    Product.category_id.is_(None), Product.category_manual.is_(False)
+                )
+            )
+        ).scalars().all()
+        assigned = 0
+        for product in products:
+            category_id = classify(product.name, rules)
+            if category_id is not None:
+                product.category_id = category_id
+                assigned += 1
+        if assigned:
+            await session.commit()
+        return assigned
+
+
+def _serialized_from(product: Product, categories: dict[int, Category]) -> bool:
+    """То же, что _is_serialized, но по уже загруженному справочнику категорий."""
+    if product.serialized is not None:
+        return bool(product.serialized)
+    category = categories.get(product.category_id)
+    if category is None:
+        return False
+    if category.serialized:
+        return True
+    parent = categories.get(category.parent_id) if category.parent_id else None
+    return bool(parent and parent.serialized)
+
+
+def _category_path(category: Category | None, by_id: dict) -> dict[str, Any]:
+    if category is None:
+        return {"category_id": None, "category": "Без категории", "subcategory": "", "path": "Без категории"}
+    parent = by_id.get(category.parent_id) if category.parent_id else None
+    if parent is None:
+        return {"category_id": category.id, "category": category.name, "subcategory": "",
+                "path": category.name}
+    return {"category_id": category.id, "category": parent.name, "subcategory": category.name,
+            "path": f"{parent.name} → {category.name}"}
+
+
+async def list_categories() -> list[dict[str, Any]]:
+    """Дерево категорий: разделы с подкатегориями."""
+    async with Session() as session:
+        categories = (await session.execute(select(Category))).scalars().all()
+    tops = sorted((c for c in categories if c.parent_id is None), key=lambda c: c.position)
+    tree = []
+    for top in tops:
+        children = sorted((c for c in categories if c.parent_id == top.id), key=lambda c: c.position)
+        tree.append({
+            "id": top.id,
+            "name": top.name,
+            "serialized": bool(top.serialized),
+            "children": [
+                {"id": c.id, "name": c.name, "serialized": bool(c.serialized), "keywords": c.keywords}
+                for c in children
+            ],
+        })
+    return tree
+
+
+async def set_product_category(product_id: int, category_id: int | None) -> bool:
+    """Ручная категория товара — запоминается, автоклассификатор её не трогает."""
+    async with Session() as session:
+        product = await session.get(Product, product_id)
+        if product is None:
+            return False
+        product.category_id = category_id
+        product.category_manual = True
+        await session.commit()
+        return True
+
+
+async def update_category_keywords(category_id: int, keywords: str) -> bool:
+    async with Session() as session:
+        category = await session.get(Category, category_id)
+        if category is None:
+            return False
+        category.keywords = keywords.strip()
+        await session.commit()
+    # новые слова сразу применяем к ещё не разложенным товарам
+    await classify_unassigned_products()
+    return True
+
+
+async def _is_serialized(session: AsyncSession, product: Product) -> bool:
+    """Поштучный учёт: ручная настройка товара важнее настройки категории."""
+    if product.serialized is not None:
+        return bool(product.serialized)
+    if product.category_id is None:
+        return False
+    category = await session.get(Category, product.category_id)
+    if category is None:
+        return False
+    if category.serialized:
+        return True
+    if category.parent_id:
+        parent = await session.get(Category, category.parent_id)
+        return bool(parent and parent.serialized)
+    return False
+
+
+# ====================================================== МЕСТА ХРАНЕНИЯ
+
+async def _next_code(session: AsyncSession, prefix: str, width: int, model, column) -> str:
+    existing = {
+        code for (code,) in (
+            await session.execute(select(column).where(column.like(f"{prefix}-%")))
+        ).all()
+    }
+    number = len(existing) + 1
+    while f"{prefix}-{number:0{width}d}" in existing:
+        number += 1
+    return f"{prefix}-{number:0{width}d}"
+
+
+async def receiving_zone(session: AsyncSession) -> Location:
+    from db.migrate import RECEIVING_ZONE_CODE
+    return (
+        await session.execute(select(Location).where(Location.code == RECEIVING_ZONE_CODE))
+    ).scalar_one()
+
+
+def location_to_dict(location: Location, category_ids: list[int] | None = None) -> dict[str, Any]:
+    return {
+        "id": location.id,
+        "kind": location.kind,
+        "code": location.code,
+        "name": location.name,
+        "parent_id": location.parent_id,
+        "note": location.note,
+        "category_ids": category_ids or [],
+    }
+
+
+async def create_location(
+    kind: str,
+    name: str,
+    parent_id: int | None = None,
+    category_ids: list[int] | None = None,
+    note: str = "",
+) -> dict[str, Any]:
+    """Новая полка (SH-01) или коробка (BX-001) с назначением по категориям."""
+    if kind not in {"shelf", "box"}:
+        raise ValueError("kind")
+    async with Session() as session:
+        prefix, width = ("SH", 2) if kind == "shelf" else ("BX", 3)
+        location = Location(
+            kind=kind,
+            code=await _next_code(session, prefix, width, Location, Location.code),
+            name=name.strip(),
+            parent_id=parent_id if kind == "box" else None,
+            note=note.strip(),
+        )
+        session.add(location)
+        await session.flush()
+        for category_id in category_ids or []:
+            session.add(LocationCategory(location_id=location.id, category_id=int(category_id)))
+        await session.commit()
+        await session.refresh(location)
+        return location_to_dict(location, list(category_ids or []))
+
+
+async def update_location(
+    location_id: int,
+    name: str | None = None,
+    parent_id: int | None = None,
+    category_ids: list[int] | None = None,
+    note: str | None = None,
+    active: bool | None = None,
+) -> dict[str, Any] | None:
+    async with Session() as session:
+        location = await session.get(Location, location_id)
+        if location is None or location.kind == "zone":
+            return None
+        if name is not None:
+            location.name = name.strip()
+        if note is not None:
+            location.note = note.strip()
+        if active is not None:
+            location.active = active
+        if location.kind == "box" and parent_id is not None:
+            location.parent_id = parent_id or None
+        if category_ids is not None:
+            await session.execute(
+                LocationCategory.__table__.delete().where(LocationCategory.location_id == location_id)
+            )
+            for category_id in category_ids:
+                session.add(LocationCategory(location_id=location_id, category_id=int(category_id)))
+        await session.commit()
+        await session.refresh(location)
+        links = (
+            await session.execute(select(LocationCategory).where(LocationCategory.location_id == location_id))
+        ).scalars().all()
+        return location_to_dict(location, [link.category_id for link in links])
+
+
+async def _balances(session: AsyncSession) -> dict[tuple[int, int], float]:
+    """Остаток по каждой паре (товар, место): пришло туда минус ушло оттуда."""
+    totals: dict[tuple[int, int], float] = {}
+    incoming = await session.execute(
+        select(Movement.product_id, Movement.to_location_id, func.sum(Movement.quantity))
+        .where(Movement.to_location_id.is_not(None), Movement.product_id.is_not(None))
+        .group_by(Movement.product_id, Movement.to_location_id)
+    )
+    for product_id, location_id, quantity in incoming.all():
+        totals[(product_id, location_id)] = totals.get((product_id, location_id), 0) + float(quantity or 0)
+    outgoing = await session.execute(
+        select(Movement.product_id, Movement.from_location_id, func.sum(Movement.quantity))
+        .where(Movement.from_location_id.is_not(None), Movement.product_id.is_not(None))
+        .group_by(Movement.product_id, Movement.from_location_id)
+    )
+    for product_id, location_id, quantity in outgoing.all():
+        totals[(product_id, location_id)] = totals.get((product_id, location_id), 0) - float(quantity or 0)
+    return {key: value for key, value in totals.items() if abs(value) > 1e-9}
+
+
+async def list_locations() -> list[dict[str, Any]]:
+    """Полки с коробками, назначением и тем, сколько позиций в каждой лежит."""
+    async with Session() as session:
+        locations = (await session.execute(select(Location).where(Location.active.is_(True)))).scalars().all()
+        links = (await session.execute(select(LocationCategory))).scalars().all()
+        balances = await _balances(session)
+        instances = (
+            await session.execute(
+                select(Instance.location_id, func.count())
+                .where(Instance.status == "stock")
+                .group_by(Instance.location_id)
+            )
+        ).all()
+    cats_by_location: dict[int, list[int]] = {}
+    for link in links:
+        cats_by_location.setdefault(link.location_id, []).append(link.category_id)
+    products_by_location: dict[int, int] = {}
+    for (product_id, location_id), quantity in balances.items():
+        if quantity > 0:
+            products_by_location[location_id] = products_by_location.get(location_id, 0) + 1
+    instance_counts = {location_id: count for location_id, count in instances}
+
+    rows = []
+    for location in sorted(locations, key=lambda l: ({"zone": 0, "shelf": 1, "box": 2}[l.kind], l.code)):
+        data = location_to_dict(location, cats_by_location.get(location.id, []))
+        data["products"] = products_by_location.get(location.id, 0)
+        data["instances"] = instance_counts.get(location.id, 0)
+        rows.append(data)
+    return rows
+
+
+async def resolve_code(code: str) -> dict[str, Any] | None:
+    """Что за код отсканировали: полка, коробка, экземпляр или позиция заявки."""
+    cleaned = (code or "").strip()
+    # QR может содержать ссылку вида …/s/SH-01 — берём хвост
+    if "/" in cleaned:
+        cleaned = cleaned.rstrip("/").rsplit("/", 1)[-1]
+    cleaned = cleaned.upper()
+    if not cleaned:
+        return None
+
+    async with Session() as session:
+        location = (
+            await session.execute(select(Location).where(Location.code == cleaned))
+        ).scalar_one_or_none()
+        if location is not None:
+            return {"type": location.kind, "code": cleaned, "id": location.id}
+        instance = (
+            await session.execute(select(Instance).where(Instance.code == cleaned))
+        ).scalar_one_or_none()
+        if instance is not None:
+            return {"type": "instance", "code": cleaned, "id": instance.id}
+        item = (
+            await session.execute(select(Item).where(Item.stock_code == cleaned))
+        ).scalar_one_or_none()
+        if item is not None:
+            return {"type": "position", "code": cleaned, "id": item.id}
+    return None
+
+
+# ====================================================== ОСТАТКИ И ДВИЖЕНИЯ
+
+def instance_to_dict(instance: Instance, product: Product | None = None,
+                     location: Location | None = None) -> dict[str, Any]:
+    return {
+        "id": instance.id,
+        "code": instance.code,
+        "product_id": instance.product_id,
+        "product_name": product.name if product else "",
+        "category_id": product.category_id if product else None,
+        "location_id": instance.location_id,
+        "location_code": location.code if location else "",
+        "location_name": location.name if location else "",
+        "status": instance.status,
+        "issued_to": instance.issued_to,
+    }
+
+
+async def location_contents(location_id: int) -> dict[str, Any] | None:
+    """Что лежит в месте: товары количеством и экземпляры поштучно."""
+    async with Session() as session:
+        location = await session.get(Location, location_id)
+        if location is None:
+            return None
+        balances = await _balances(session)
+        product_ids = [pid for (pid, lid), qty in balances.items() if lid == location_id and qty > 0]
+        products = {
+            p.id: p for p in (
+                await session.execute(select(Product).where(Product.id.in_(product_ids)))
+            ).scalars().all()
+        } if product_ids else {}
+        categories = {c.id: c for c in (await session.execute(select(Category))).scalars().all()}
+        instances = (
+            await session.execute(
+                select(Instance).where(Instance.location_id == location_id, Instance.status == "stock")
+            )
+        ).scalars().all()
+        instance_products = {
+            p.id: p for p in (
+                await session.execute(
+                    select(Product).where(Product.id.in_([i.product_id for i in instances]))
+                )
+            ).scalars().all()
+        } if instances else {}
+        children = (
+            await session.execute(select(Location).where(Location.parent_id == location_id))
+        ).scalars().all()
+        links = (
+            await session.execute(select(LocationCategory).where(LocationCategory.location_id == location_id))
+        ).scalars().all()
+
+        items = []
+        for product_id in product_ids:
+            product = products[product_id]
+            items.append({
+                "product_id": product_id,
+                "name": product.name,
+                "unit": product.unit,
+                "quantity": balances[(product_id, location_id)],
+                **_category_path(categories.get(product.category_id), categories),
+            })
+        items.sort(key=lambda row: (row["path"], row["name"]))
+        return {
+            "location": location_to_dict(location, [link.category_id for link in links]),
+            "items": items,
+            "instances": [instance_to_dict(i, instance_products.get(i.product_id), location) for i in instances],
+            "boxes": [location_to_dict(child) for child in children if child.active],
+        }
+
+
+async def stock_overview() -> list[dict[str, Any]]:
+    """Остатки по товарам: сколько всего и где лежит. Основа вкладки «Хранение»."""
+    async with Session() as session:
+        balances = await _balances(session)
+        products = {p.id: p for p in (await session.execute(select(Product))).scalars().all()}
+        locations = {l.id: l for l in (await session.execute(select(Location))).scalars().all()}
+        categories = {c.id: c for c in (await session.execute(select(Category))).scalars().all()}
+
+    by_product: dict[int, dict[str, Any]] = {}
+    for (product_id, location_id), quantity in balances.items():
+        if quantity <= 0 or product_id not in products:
+            continue
+        product = products[product_id]
+        row = by_product.setdefault(product_id, {
+            "product_id": product_id,
+            "name": product.name,
+            "unit": product.unit,
+            "min_stock": product.min_stock,
+            "serialized": _serialized_from(product, categories),
+            "total": 0.0,
+            "places": [],
+            **_category_path(categories.get(product.category_id), categories),
+        })
+        location = locations.get(location_id)
+        row["total"] += quantity
+        row["places"].append({
+            "location_id": location_id,
+            "code": location.code if location else "",
+            "name": location.name if location else "",
+            "kind": location.kind if location else "",
+            "quantity": quantity,
+        })
+    rows = list(by_product.values())
+    for row in rows:
+        row["low"] = row["min_stock"] is not None and row["total"] < row["min_stock"]
+        row["places"].sort(key=lambda place: (place["kind"] != "zone", place["code"]))
+    rows.sort(key=lambda row: (row["category"] == "Без категории", row["path"], row["name"]))
+    return rows
+
+
+async def receiving_queue() -> list[dict[str, Any]]:
+    """Что лежит в зоне приёмки и ждёт размещения по полкам."""
+    async with Session() as session:
+        zone = await receiving_zone(session)
+    contents = await location_contents(zone.id)
+    return contents or {"items": [], "instances": []}
+
+
+async def _write_move(
+    session: AsyncSession,
+    *,
+    kind: str,
+    product_id: int,
+    quantity: float,
+    actor_name: str,
+    from_location_id: int | None = None,
+    to_location_id: int | None = None,
+    instance_id: int | None = None,
+    item_id: int | None = None,
+    recipient_name: str = "",
+    recipient_employee_id: int | None = None,
+    actor_employee_id: int | None = None,
+    note: str = "",
+) -> Movement:
+    movement = Movement(
+        kind=kind,
+        product_id=product_id,
+        quantity=float(quantity),
+        actor_name=actor_name,
+        actor_employee_id=actor_employee_id,
+        from_location_id=from_location_id,
+        to_location_id=to_location_id,
+        instance_id=instance_id,
+        item_id=item_id,
+        recipient_name=recipient_name,
+        recipient_employee_id=recipient_employee_id,
+        note=note,
+    )
+    session.add(movement)
+    await session.flush()
+    return movement
+
+
+async def place(
+    *,
+    product_id: int | None = None,
+    quantity: float = 0,
+    instance_id: int | None = None,
+    to_location_id: int,
+    from_location_id: int | None = None,
+    actor_name: str = "",
+) -> dict[str, Any]:
+    """Размещение или перемещение: переложить товар из одного места в другое.
+
+    По умолчанию берём из зоны приёмки. Для крупного товара указывается
+    экземпляр — он переезжает целиком.
+    """
+    async with Session() as session:
+        target = await session.get(Location, to_location_id)
+        if target is None:
+            return {"ok": False, "error": "no_location"}
+
+        if instance_id is not None:
+            instance = await session.get(Instance, instance_id)
+            if instance is None or instance.status != "stock":
+                return {"ok": False, "error": "no_instance"}
+            source_id = instance.location_id
+            await _write_move(
+                session, kind="move", product_id=instance.product_id, quantity=1,
+                actor_name=actor_name, from_location_id=source_id,
+                to_location_id=to_location_id, instance_id=instance.id,
+            )
+            instance.location_id = to_location_id
+            await session.commit()
+            return {"ok": True, "moved": 1, "to": target.code}
+
+        if product_id is None or quantity <= 0:
+            return {"ok": False, "error": "bad_request"}
+        if from_location_id is None:
+            from_location_id = (await receiving_zone(session)).id
+        available = (await _balances(session)).get((product_id, from_location_id), 0)
+        if quantity > available + 1e-9:
+            return {"ok": False, "error": "not_enough", "available": available}
+        await _write_move(
+            session, kind="move", product_id=product_id, quantity=quantity,
+            actor_name=actor_name, from_location_id=from_location_id, to_location_id=to_location_id,
+        )
+        await session.commit()
+        return {"ok": True, "moved": quantity, "to": target.code}
+
+
+async def issue_from_stock(
+    *,
+    product_id: int | None = None,
+    quantity: float = 0,
+    location_id: int | None = None,
+    instance_id: int | None = None,
+    actor_name: str = "",
+    actor_employee_id: int | None = None,
+    recipient_name: str = "",
+    recipient_employee_id: int | None = None,
+    note: str = "",
+) -> dict[str, Any]:
+    """Выдача со склада без заявки — так разбирают расходники на нужды."""
+    async with Session() as session:
+        if instance_id is not None:
+            instance = await session.get(Instance, instance_id)
+            if instance is None or instance.status != "stock":
+                return {"ok": False, "error": "no_instance"}
+            await _write_move(
+                session, kind="out", product_id=instance.product_id, quantity=1,
+                actor_name=actor_name, actor_employee_id=actor_employee_id,
+                from_location_id=instance.location_id, instance_id=instance.id,
+                item_id=instance.item_id, recipient_name=recipient_name,
+                recipient_employee_id=recipient_employee_id, note=note,
+            )
+            instance.status = "issued"
+            instance.issued_to = recipient_name
+            instance.issued_at = utcnow()
+            instance.location_id = None
+            await session.commit()
+            return {"ok": True, "issued": 1}
+
+        if product_id is None or location_id is None or quantity <= 0:
+            return {"ok": False, "error": "bad_request"}
+        available = (await _balances(session)).get((product_id, location_id), 0)
+        if quantity > available + 1e-9:
+            return {"ok": False, "error": "not_enough", "available": available}
+        await _write_move(
+            session, kind="out", product_id=product_id, quantity=quantity,
+            actor_name=actor_name, actor_employee_id=actor_employee_id,
+            from_location_id=location_id, recipient_name=recipient_name,
+            recipient_employee_id=recipient_employee_id, note=note,
+        )
+        await session.commit()
+        return {"ok": True, "issued": quantity}
+
+
+async def get_instance(instance_id: int) -> dict[str, Any] | None:
+    async with Session() as session:
+        instance = await session.get(Instance, instance_id)
+        if instance is None:
+            return None
+        product = await session.get(Product, instance.product_id)
+        location = await session.get(Location, instance.location_id) if instance.location_id else None
+        return instance_to_dict(instance, product, location)
+
+
+async def list_instances(item_id: int | None = None, product_id: int | None = None) -> list[dict[str, Any]]:
+    stmt = select(Instance).order_by(Instance.id)
+    if item_id is not None:
+        stmt = stmt.where(Instance.item_id == item_id)
+    if product_id is not None:
+        stmt = stmt.where(Instance.product_id == product_id)
+    async with Session() as session:
+        instances = (await session.execute(stmt)).scalars().all()
+        products = {p.id: p for p in (await session.execute(select(Product))).scalars().all()}
+        locations = {l.id: l for l in (await session.execute(select(Location))).scalars().all()}
+    return [
+        instance_to_dict(i, products.get(i.product_id), locations.get(i.location_id))
+        for i in instances
+    ]
+
+
+async def products_catalog() -> list[dict[str, Any]]:
+    """Справочник товаров с категориями — для ручной правки."""
+    async with Session() as session:
+        products = (await session.execute(select(Product).order_by(Product.name))).scalars().all()
+        categories = {c.id: c for c in (await session.execute(select(Category))).scalars().all()}
+        result = []
+        for product in products:
+            result.append({
+                "id": product.id,
+                "name": product.name,
+                "unit": product.unit,
+                "category_manual": bool(product.category_manual),
+                "serialized": await _is_serialized(session, product),
+                "serialized_override": product.serialized,
+                "min_stock": product.min_stock,
+                **_category_path(categories.get(product.category_id), categories),
+            })
+        return result
+
+
+async def update_product(
+    product_id: int,
+    *,
+    category_id: int | None | str = "keep",
+    serialized: bool | None | str = "keep",
+    min_stock: float | None | str = "keep",
+) -> bool:
+    async with Session() as session:
+        product = await session.get(Product, product_id)
+        if product is None:
+            return False
+        if category_id != "keep":
+            product.category_id = category_id
+            product.category_manual = True
+        if serialized != "keep":
+            product.serialized = serialized
+        if min_stock != "keep":
+            product.min_stock = min_stock
+        await session.commit()
+        return True

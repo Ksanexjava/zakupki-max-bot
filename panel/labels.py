@@ -22,27 +22,65 @@ def qr_svg(data: str) -> str:
 
 
 def qr_payload(code: str) -> str:
-    """Что зашито в QR: сам код или ссылка, если задан STOCK_QR_BASE."""
-    base = settings.stock_qr_base
+    """Что зашито в QR.
+
+    Если известен адрес панели — ссылка вида …/s/SH-01: её откроет обычная
+    камера телефона, без всяких приложений. Иначе просто код.
+    """
+    base = settings.stock_qr_base or (
+        f"{settings.panel_public_url}/s" if settings.panel_public_url else ""
+    )
     return f"{base.rstrip('/')}/{code}" if base else code
 
 
-def render(items: list[dict[str, Any]]) -> str:
-    """Собирает страницу наклеек по списку позиций."""
+def position_label(item: dict[str, Any], request_id: int) -> dict[str, str]:
+    return {
+        "code": item.get("stock_code") or "",
+        "title": (item.get("name") or "")[:80],
+        "meta": f"Заявка №{request_id} · {item.get('quantity') or ''}",
+        "kind": "item",
+    }
+
+
+def location_label(location: dict[str, Any], categories: dict[int, str],
+                   locations: dict[int, dict[str, Any]]) -> dict[str, str]:
+    kind = {"shelf": "Полка", "box": "Коробка", "zone": "Зона"}.get(location["kind"], "")
+    purpose = ", ".join(categories[c] for c in location.get("category_ids", []) if c in categories)
+    parent = locations.get(location.get("parent_id"))
+    meta = purpose or ""
+    if parent is not None:
+        meta = f"на полке {parent['code']}" + (f" · {meta}" if meta else "")
+    return {
+        "code": location["code"],
+        "title": f"{kind}: {location['name']}"[:80],
+        "meta": meta[:90],
+        "kind": location["kind"],
+    }
+
+
+def instance_label(instance: dict[str, Any]) -> dict[str, str]:
+    return {
+        "code": instance["code"],
+        "title": (instance.get("product_name") or "")[:80],
+        "meta": "инвентарный номер",
+        "kind": "instance",
+    }
+
+
+def render(labels: list[dict[str, str]]) -> str:
+    """Собирает страницу наклеек. Каждая наклейка: код, заголовок, подпись."""
     cells = []
-    for item in items:
-        code = item.get("stock_code") or ""
-        name = (item.get("name") or "")[:70]
-        quantity = item.get("quantity") or ""
-        request_id = item.get("request_id") or ""
+    for label in labels:
+        code = label.get("code") or ""
+        big = " big" if label.get("kind") in {"shelf", "box"} else ""
         cells.append(
             f"""
-      <div class="label">
+      <div class="label{big}">
         <div class="qr">{qr_svg(qr_payload(code))}</div>
         <div class="text">
           <div class="code">{escape(code)}</div>
-          <div class="name">{escape(name)}</div>
-          <div class="meta">Заявка №{escape(str(request_id))} · {escape(quantity)}</div>
+          <div class="name">{escape(label.get("title") or "")}</div>
+          <div class="meta">{escape(label.get("meta") or "")}</div>
         </div>
       </div>"""
         )
@@ -94,6 +132,8 @@ def render(items: list[dict[str, Any]]) -> str:
     overflow: hidden;
   }}
   .meta {{ font-size: 2.8mm; color: #555; margin-top: 1mm; }}
+  .label.big .code {{ font-size: 5.5mm; }}
+  .label.big .name {{ font-size: 3.4mm; font-weight: 600; }}
 
   .hint {{ max-width: 200mm; margin: 10mm auto 4mm; font-size: 13px; color: #444; }}
   @media screen {{

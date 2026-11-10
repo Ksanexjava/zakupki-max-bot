@@ -18,6 +18,7 @@ from core.notifications import notify_admins
 from core.parsing import parse_items
 from core.statuses import label
 from db import repo
+from db.migrate import split_link
 
 log = logging.getLogger(__name__)
 router = Router(router_id="request")
@@ -165,7 +166,13 @@ async def step_item(event: MessageCreated, context: BaseContext) -> None:
     value = await _take_text(event, "item")
     if value is None:
         return
-    await context.update_data(draft={"name": value})
+    # ссылку, вставленную прямо в название, выносим в отдельное поле —
+    # тогда и спрашивать пример потом не нужно
+    name, link = split_link(value)
+    draft: dict[str, Any] = {"name": name}
+    if link:
+        draft["link"] = link[: LIMITS["link"]]
+    await context.update_data(draft=draft)
     await _ask_quantity(event.message.answer, context)
 
 
@@ -189,6 +196,10 @@ async def step_quantity(event: MessageCreated, context: BaseContext) -> None:
     draft = dict(data.get("draft") or {})
     draft["quantity"] = value
     await context.update_data(draft=draft)
+    if draft.get("link"):
+        # ссылка уже пришла вместе с названием — шаг с примером пропускаем
+        await _finish_position(event.message.answer, context)
+        return
     await _ask_example(event.message.answer, context)
 
 

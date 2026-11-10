@@ -144,6 +144,9 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent); }
   flex-wrap: wrap;
 }
 .topbar h1 { font-size: 15px; }
+.home-link { color: var(--muted); text-decoration: none; font-weight: 500; }
+.home-link:hover { color: var(--text); }
+.crumb { color: var(--border); margin: 0 4px; font-weight: 400; }
 .topbar-right { display: flex; align-items: center; gap: 8px; }
 .search { width: 260px; }
 .user { color: var(--muted); font-size: 13px; }

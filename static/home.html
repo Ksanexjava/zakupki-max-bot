@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Портал</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/portal.css">
+  <script>
+    try {
+      var saved = localStorage.getItem('pb_theme');
+      if (saved === 'light' || saved === 'dark') document.documentElement.dataset.theme = saved;
+    } catch (e) {}
+  </script>
+</head>
+<body>
+
+<section id="login-screen" class="login-screen" hidden>
+  <form class="login-card" id="login-form">
+    <h1>Вход в портал</h1>
+    <p class="muted">Логин и пароль выдаёт администратор.</p>
+    <label>Логин <input type="text" id="login" autocomplete="username" required></label>
+    <label>Пароль <input type="password" id="password" autocomplete="current-password" required></label>
+    <button type="submit" class="btn btn-primary btn-block">Войти</button>
+    <p class="form-error" id="login-error" hidden></p>
+  </form>
+</section>
+
+<div id="app" class="app" hidden>
+  <header class="portal-bar">
+    <a class="portal-brand" href="/">Портал</a>
+    <nav class="portal-nav" id="portal-nav"></nav>
+    <div class="portal-user">
+      <span id="user-chip"></span>
+      <button class="btn btn-quiet" id="logout-btn">Выйти</button>
+    </div>
+  </header>
+
+  <main class="home">
+    <h1 class="home-title">Дом Милосердия</h1>
+    <p class="home-sub">Закупки и склад</p>
+    <div id="sections"></div>
+  </main>
+</div>
+
+<script src="/static/home.js"></script>
+</body>
+</html>

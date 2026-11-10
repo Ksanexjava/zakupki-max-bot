@@ -18,7 +18,8 @@ def panel_link(request_id: int | None = None) -> str:
     """Ссылка на панель (на конкретную заявку, если указан номер)."""
     if not settings.panel_public_url:
         return ""
-    return f"{settings.panel_public_url}/#{request_id}" if request_id else settings.panel_public_url
+    base = f"{settings.panel_public_url}/zayavki"
+    return f"{base}#{request_id}" if request_id else base
 
 
 async def recipients() -> list[int]:
