@@ -1420,3 +1420,72 @@ async def update_product(
             product.min_stock = min_stock
         await session.commit()
         return True
+
+
+async def receive_manual(
+    *,
+    name: str,
+    quantity: float,
+    unit: str = "",
+    category_id: int | None = None,
+    note: str = "",
+    actor_name: str = "",
+    actor_employee_id: int | None = None,
+) -> dict[str, Any]:
+    """Приём товара без заявки: принесли, передали, купили сами.
+
+    Товар ищется по названию среди известных или заводится новый. Категорию
+    можно указать сразу — тогда она запоминается как ручная. Приход падает в
+    зону приёмки, как и обычный, поштучный товар получает номера.
+    """
+    name = (name or "").strip()
+    quantity = float(quantity or 0)
+    if not name or quantity <= 0:
+        return {"ok": False, "error": "bad_request"}
+    created: list[str] = []
+    async with Session() as session:
+        product = await _get_or_create_product(session, name, unit.strip())
+        if category_id is not None and product.category_id != category_id:
+            product.category_id = category_id
+            product.category_manual = True
+        if unit.strip() and not product.unit:
+            product.unit = unit.strip()
+        zone = await receiving_zone(session)
+        await _write_move(
+            session, kind="in", product_id=product.id, quantity=quantity,
+            actor_name=actor_name, actor_employee_id=actor_employee_id,
+            to_location_id=zone.id, note=note.strip() or "без заявки",
+        )
+        if await _is_serialized(session, product):
+            for _ in range(int(round(quantity))):
+                instance = Instance(
+                    code=await _next_code(session, "IN", 5, Instance, Instance.code),
+                    product_id=product.id,
+                    location_id=zone.id,
+                )
+                session.add(instance)
+                await session.flush()
+                created.append(instance.code)
+        product_id = product.id
+        await session.commit()
+    return {"ok": True, "product_id": product_id, "item": {"product_id": product_id}, "instances_created": created}
+
+
+async def suggest_category(name: str) -> int | None:
+    """Какую категорию классификатор дал бы товару с таким названием."""
+    key = normalize_name(name or "")
+    async with Session() as session:
+        product = (
+            await session.execute(select(Product).where(Product.norm_name == key))
+        ).scalar_one_or_none()
+        if product is not None and product.category_id is not None:
+            return product.category_id
+        return classify(name or "", await _load_rules(session))
+
+
+async def product_paths() -> dict[int, str]:
+    """Путь категории для каждого товара — для подписей на наклейках."""
+    async with Session() as session:
+        products = (await session.execute(select(Product))).scalars().all()
+        categories = {c.id: c for c in (await session.execute(select(Category))).scalars().all()}
+    return {p.id: _category_path(categories.get(p.category_id), categories)["path"] for p in products}

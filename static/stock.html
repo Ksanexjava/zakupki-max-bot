@@ -32,7 +32,7 @@
     <div class="stock-bar-top">
       <a class="portal-brand" href="/">Портал</a>
       <span class="crumb">/</span>
-      <span class="stock-title">Склад</span>
+      <select id="warehouse" class="wh-select" aria-label="Склад"></select>
       <span class="spacer"></span>
       <label class="who">
         <span class="who-label">Работает</span>
@@ -67,6 +67,16 @@
     <div id="scan-overlay-body"></div>
   </div>
 </div>
+
+<aside class="drawer" id="drawer" hidden aria-label="Карточка сотрудника">
+  <div class="drawer-sheet">
+    <header class="drawer-head">
+      <strong id="drawer-title">Сотрудник</strong>
+      <button class="icon-btn" id="drawer-close" title="Закрыть">&times;</button>
+    </header>
+    <div class="drawer-body" id="drawer-body"></div>
+  </div>
+</aside>
 
 <div class="toast" id="toast" hidden></div>
 

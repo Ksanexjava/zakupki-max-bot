@@ -24,7 +24,7 @@ from core.notifications import (
 from core.statuses import STATUSES
 from panel import labels as labels_page
 from core.notifications import notify_author_arrived  # noqa: E402
-from db import repo
+from db import analytics, repo
 
 log = logging.getLogger("panel")
 
@@ -728,6 +728,61 @@ async def handle_instances(request: web.Request) -> web.StreamResponse:
     return web.json_response({"instances": rows})
 
 
+def _admin_only(request: web.Request) -> web.StreamResponse | None:
+    if current_role(request) != "admin":
+        return web.json_response({"error": "forbidden"}, status=403)
+    return None
+
+
+async def handle_dashboard(request: web.Request) -> web.StreamResponse:
+    """Дашборд склада — только для администратора."""
+    if (denied := _admin_only(request)) is not None:
+        return denied
+    def number(name: str) -> int | None:
+        value = request.query.get(name, "")
+        return int(value) if value.isdigit() else None
+    start, end = analytics.parse_period(request.query.get("from"), request.query.get("to"))
+    return web.json_response(await analytics.dashboard(number("top"), number("sub"), start, end))
+
+
+async def handle_recipients(request: web.Request) -> web.StreamResponse:
+    if (denied := _admin_only(request)) is not None:
+        return denied
+    return web.json_response({"recipients": await analytics.recipients_list()})
+
+
+async def handle_recipient_report(request: web.Request) -> web.StreamResponse:
+    if (denied := _admin_only(request)) is not None:
+        return denied
+    start, end = analytics.parse_period(request.query.get("from"), request.query.get("to"))
+    report = await analytics.recipient_report(request.query.get("key", ""), start, end)
+    if report is None:
+        return web.json_response({"error": "not_found"}, status=404)
+    return web.json_response(report)
+
+
+async def handle_receive_manual(request: web.Request) -> web.StreamResponse:
+    """Приём без заявки: товар принесли или передали лично."""
+    payload = await _json(request)
+    try:
+        result = await repo.receive_manual(
+            name=str(payload.get("name", "")),
+            quantity=float(payload.get("quantity") or 0),
+            unit=str(payload.get("unit", "")),
+            category_id=int(payload["category_id"]) if payload.get("category_id") else None,
+            note=str(payload.get("note", "")),
+            actor_name=_actor(request, payload),
+            actor_employee_id=payload.get("actor_employee_id") or None,
+        )
+    except (TypeError, ValueError):
+        return web.json_response({"error": "bad_request"}, status=400)
+    return web.json_response(result, status=200 if result.get("ok") else 400)
+
+
+async def handle_classify(request: web.Request) -> web.StreamResponse:
+    return web.json_response({"category_id": await repo.suggest_category(request.query.get("name", ""))})
+
+
 async def handle_scan_link(request: web.Request) -> web.StreamResponse:
     """QR со ссылкой …/s/SH-01: открываем сканер склада сразу на этом коде."""
     code = request.match_info["code"]
@@ -772,17 +827,19 @@ async def handle_labels(request: web.Request) -> web.StreamResponse:
         return [int(x) for x in request.query.get(name, "").replace(";", ",").split(",") if x.strip().isdigit()]
 
     labels: list[dict] = []
+    paths = await repo.product_paths()
 
     raw_request = request.query.get("request", "")
     if raw_request.isdigit():
         found = await repo.get_request(int(raw_request))
         if found is not None:
             for item in found.items:
-                labels.append(labels_page.position_label(repo.item_to_dict(item), found.id))
+                data = repo.item_to_dict(item)
+                labels.append(labels_page.position_label(data, paths.get(data["product_id"], "")))
     for item_id in ids("items"):
         found = await repo.find_item_by_id(item_id)
         if found is not None:
-            labels.append(labels_page.position_label(found, found["request_id"]))
+            labels.append(labels_page.position_label(found, paths.get(found["product_id"], "")))
 
     instance_ids = ids("instances")
     location_ids = ids("locations")
@@ -797,7 +854,7 @@ async def handle_labels(request: web.Request) -> web.StreamResponse:
         elif found["type"] == "position":
             item = await repo.find_item_by_id(found["id"])
             if item is not None:
-                labels.append(labels_page.position_label(item, item["request_id"]))
+                labels.append(labels_page.position_label(item, paths.get(item["product_id"], "")))
     if location_ids:
         tree = await repo.list_categories()
         categories = {top["id"]: top["name"] for top in tree} | {
@@ -811,7 +868,7 @@ async def handle_labels(request: web.Request) -> web.StreamResponse:
     for instance_id in instance_ids:
         instance = await repo.get_instance(instance_id)
         if instance is not None:
-            labels.append(labels_page.instance_label(instance))
+            labels.append(labels_page.instance_label(instance, paths.get(instance["product_id"], "")))
 
     if not labels:
         return web.json_response({"error": "nothing_to_print"}, status=404)
@@ -867,6 +924,11 @@ def create_app(bot: Any = None) -> web.Application:
             web.post("/api/stock/issue", handle_issue),
             web.get("/api/stock/resolve", handle_resolve),
             web.get("/api/stock/instances", handle_instances),
+            web.get("/api/stock/dashboard", handle_dashboard),
+            web.get("/api/stock/recipients", handle_recipients),
+            web.get("/api/stock/recipient", handle_recipient_report),
+            web.post("/api/stock/receive-manual", handle_receive_manual),
+            web.get("/api/stock/classify", handle_classify),
             web.get("/api/employees", handle_employees),
             web.post("/api/employees", handle_employee_add),
             web.post(r"/api/requests/{request_id:\d+}/attachments", handle_upload),

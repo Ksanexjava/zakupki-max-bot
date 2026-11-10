@@ -14,6 +14,9 @@ const ICONS = {
   scan: '<path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10"/>',
   tag: '<path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><path d="M7 7h.01"/>',
   clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+  box: '<path d="M21 8 12 3 3 8v8l9 5 9-5V8z"/><path d="m3 8 9 5 9-5M12 13v8"/>',
+  sofa: '<path d="M4 11V8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v3"/><path d="M2 13a2 2 0 0 1 4 0v2h12v-2a2 2 0 0 1 4 0v4H2v-4zM5 17v2M19 17v2"/>',
+  pen: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/>',
 };
 const icon = (name) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`;
@@ -27,15 +30,12 @@ const SECTIONS = [
     ],
   },
   {
-    title: 'Склад',
+    title: 'Склады',
     roles: ['admin', 'stock'],
     tiles: [
-      { href: '/sklad#/priemka', icon: 'inbox', title: 'Приёмка и размещение', text: 'Отметить, что привезли, разложить по полкам и напечатать QR' },
-      { href: '/sklad#/hranenie', icon: 'layers', title: 'Хранение', text: 'Остатки по категориям и подкатегориям' },
-      { href: '/sklad#/vydacha', icon: 'out', title: 'Выдача по заявкам', text: 'Отдать заказчику то, что он заказывал' },
-      { href: '/sklad#/scan', icon: 'scan', title: 'Сканер и места', text: 'Что лежит в коробке или на полке, полки и коробки' },
-      { href: '/sklad#/tovary', icon: 'tag', title: 'Товары и категории', text: 'Справочник и распределение по категориям' },
-      { href: '/sklad#/istoriya', icon: 'clock', title: 'История', text: 'Все приходы, перемещения и выдачи' },
+      { href: '/sklad', icon: 'box', title: 'Склад снабжения', text: 'Заказы из заявок и всё, что приносят: приёмка, хранение, выдача' },
+      { href: '/sklad#/w/mebel', icon: 'sofa', title: 'Мебельный склад', text: 'В разработке', soon: true },
+      { href: '/sklad#/w/kanc', icon: 'pen', title: 'Склад канцелярии', text: 'В разработке', soon: true },
     ],
   },
 ];
@@ -47,10 +47,10 @@ function render(role) {
       <h2>${esc(section.title)}</h2>
       <div class="tiles">
         ${section.tiles.map((tile) => `
-          <a class="tile" href="${esc(tile.href)}">
+          <a class="tile${tile.soon ? ' soon' : ''}" href="${esc(tile.href)}">
             <span class="tile-icon">${icon(tile.icon)}</span>
             <span>
-              <div class="tile-title">${esc(tile.title)}</div>
+              <div class="tile-title">${esc(tile.title)}${tile.soon ? '<span class="soon-badge">скоро</span>' : ''}</div>
               <div class="tile-text">${esc(tile.text)}</div>
             </span>
           </a>`).join('')}
@@ -59,7 +59,7 @@ function render(role) {
 
   el('portal-nav').innerHTML = [
     role === 'admin' ? '<a href="/zayavki">Заявки</a>' : '',
-    '<a href="/sklad#/priemka">Склад</a>',
+    '<a href="/sklad">Склад</a>',
   ].join('');
 }
 

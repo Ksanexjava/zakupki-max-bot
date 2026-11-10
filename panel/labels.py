@@ -33,11 +33,12 @@ def qr_payload(code: str) -> str:
     return f"{base.rstrip('/')}/{code}" if base else code
 
 
-def position_label(item: dict[str, Any], request_id: int) -> dict[str, str]:
+def position_label(item: dict[str, Any], path: str = "") -> dict[str, str]:
+    """Наклейка на товар из заявки: что это и к какой категории относится."""
     return {
         "code": item.get("stock_code") or "",
-        "title": (item.get("name") or "")[:80],
-        "meta": f"Заявка №{request_id} · {item.get('quantity') or ''}",
+        "title": (item.get("name") or "")[:90],
+        "meta": path,
         "kind": "item",
     }
 
@@ -47,22 +48,20 @@ def location_label(location: dict[str, Any], categories: dict[int, str],
     kind = {"shelf": "Полка", "box": "Коробка", "zone": "Зона"}.get(location["kind"], "")
     purpose = ", ".join(categories[c] for c in location.get("category_ids", []) if c in categories)
     parent = locations.get(location.get("parent_id"))
-    meta = purpose or ""
-    if parent is not None:
-        meta = f"на полке {parent['code']}" + (f" · {meta}" if meta else "")
+    where = f"{kind} на {parent['code']}" if parent is not None else kind
     return {
         "code": location["code"],
-        "title": f"{kind}: {location['name']}"[:80],
-        "meta": meta[:90],
+        "title": location["name"][:90],
+        "meta": " · ".join(part for part in (where, purpose) if part)[:100],
         "kind": location["kind"],
     }
 
 
-def instance_label(instance: dict[str, Any]) -> dict[str, str]:
+def instance_label(instance: dict[str, Any], path: str = "") -> dict[str, str]:
     return {
         "code": instance["code"],
-        "title": (instance.get("product_name") or "")[:80],
-        "meta": "инвентарный номер",
+        "title": (instance.get("product_name") or "")[:90],
+        "meta": path,
         "kind": "instance",
     }
 
@@ -78,9 +77,9 @@ def render(labels: list[dict[str, str]]) -> str:
       <div class="label{big}">
         <div class="qr">{qr_svg(qr_payload(code))}</div>
         <div class="text">
-          <div class="code">{escape(code)}</div>
           <div class="name">{escape(label.get("title") or "")}</div>
           <div class="meta">{escape(label.get("meta") or "")}</div>
+          <div class="code">{escape(code)}</div>
         </div>
       </div>"""
         )
@@ -121,21 +120,25 @@ def render(labels: list[dict[str, str]]) -> str:
   .qr {{ flex: none; line-height: 0; }}
   .qr svg {{ display: block; width: 21mm; height: 21mm; }}
   .text {{ min-width: 0; }}
-  .code {{ font-size: 4.2mm; font-weight: 700; letter-spacing: 0.2mm; }}
   .name {{
-    font-size: 3.1mm;
-    line-height: 1.25;
-    margin-top: 1mm;
+    font-size: 3.5mm;
+    font-weight: 700;
+    line-height: 1.2;
     display: -webkit-box;
     -webkit-line-clamp: 3;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }}
-  .meta {{ font-size: 2.8mm; color: #555; margin-top: 1mm; }}
-  .label.big .code {{ font-size: 5.5mm; }}
-  .label.big .name {{ font-size: 3.4mm; font-weight: 600; }}
+  .meta {{
+    font-size: 2.7mm; color: #444; margin-top: 1mm; line-height: 1.2;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }}
+  .code {{ font-size: 2.9mm; font-family: Menlo, Consolas, monospace; margin-top: 1.2mm; letter-spacing: 0.2mm; }}
+  .label.big .name {{ font-size: 4.2mm; }}
+  .label.big .code {{ font-size: 3.4mm; font-weight: 700; }}
 
   .hint {{ max-width: 200mm; margin: 10mm auto 4mm; font-size: 13px; color: #444; }}
+  .hint button {{ font: inherit; padding: 6px 14px; margin-right: 10px; cursor: pointer; }}
   @media screen {{
     .sheet {{ background: #fff; padding: 8mm 5mm; box-shadow: 0 4px 24px rgba(0,0,0,.15); }}
   }}
@@ -148,8 +151,8 @@ def render(labels: list[dict[str, str]]) -> str:
 </head>
 <body>
   <p class="hint">
-    Лист под самоклеящуюся бумагу с сеткой 70×37 мм (24 наклейки, Avery L7160).
-    Печатать в масштабе 100%, без «подгонки по размеру страницы».
+    <button onclick="window.print()">Напечатать</button>
+    Самоклейка 70×37 мм, 24 наклейки на листе. Масштаб 100%, без подгонки по размеру.
   </p>
   <div class="sheet">{''.join(cells)}</div>
 </body>
